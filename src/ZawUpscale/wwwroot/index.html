@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f3f4f7">
+<title>ZawUpscale</title>
+<script>
+  // Apply the theme before the first paint so dark mode doesn't flash light while the app loads.
+  // The backend passes the saved preference in the launch URL; reloads reuse the session copy.
+  (function () {
+    var m = location.hash.match(/theme=(light|dark|system)/), t = m && m[1];
+    try {
+      if (t) sessionStorage.setItem('zawupscale-theme', t);
+      else t = sessionStorage.getItem('zawupscale-theme');
+    } catch (e) { /* storage unavailable */ }
+    if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+    document.querySelector('meta[name=theme-color]').content = t === 'dark' ? '#14161b' : '#f3f4f7';
+  })();
+</script>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<!-- A large bitmap for the app window's taskbar / dock icon. -->
+<link rel="icon" href="icon-256.png" type="image/png" sizes="256x256">
+<link rel="stylesheet" href="css/app.css">
+<script type="module" src="js/app.js"></script>
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><img src="favicon.svg" width="22" height="22" alt=""><span>ZawUpscale</span></div>
+  <nav id="menubar"></nav>
+  <div id="toolbar"></div>
+</header>
+<div id="main">
+  <aside id="panel"></aside>
+  <div class="splitter-v" id="split-left"></div>
+  <section id="stage"></section>
+</div>
+<div id="statusbar"></div>
+</body>
+</html>
