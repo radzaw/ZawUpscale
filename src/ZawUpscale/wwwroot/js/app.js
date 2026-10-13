@@ -4,7 +4,7 @@ import { h, debounce, makeSplitter, fmtBytes, fmtMs } from './util.js';
 import { icon } from './icons.js';
 import { contextMenu, closeMenus, alertError, confirmDlg } from './dialogs.js';
 import { Viewer } from './viewer.js';
-import { browse } from './filebrowser.js';
+import { browse, useNativeDialogs } from './filebrowser.js';
 import { modelsDialog, preferencesDialog, shortcutsDialog, aboutDialog } from './tools.js';
 
 const DEFAULT_PREFS = { theme: 'system', panelWidth: 340, viewMode: 'slider', pixelated: true };
@@ -12,6 +12,8 @@ const DEFAULT_SETTINGS = {
   model: 'realesr-general-x4v3', scale: 4, format: 'auto', quality: 92, outputDir: '', nameTemplate: '{name}',
   existing: 'skip', tile: 0, device: 'auto',
 };
+// Running in the native window (Photino injects window.external.sendMessage) rather than a browser.
+const NATIVE = typeof window.external?.sendMessage === 'function';
 const SCALES = [2, 3, 4, 8];
 const FORMATS = [['auto', 'Same'], ['png', 'PNG'], ['jpg', 'JPEG'], ['webp', 'WebP']];
 const UPLOAD_BATCH = 16;
@@ -43,6 +45,7 @@ class App {
       const [state, system, models] = await Promise.all([get('/doc/state'), get('/system'), get('/models')]);
       this.state = state || {};
       this.system = system;
+      useNativeDialogs(NATIVE);
       this.models = models;
     } catch (e) {
       document.body.textContent = e.message;
@@ -90,6 +93,7 @@ class App {
     try { sessionStorage.setItem('zawupscale-theme', p.theme); } catch { /* storage unavailable */ }
     if (this.themeBtn) this.themeBtn.innerHTML = icon(dark ? 'sun' : 'moon');
     if (this.viewer) { this.viewer.pixelated = p.pixelated; this.viewer.layout(); }
+    if (NATIVE) window.external.sendMessage(dark ? 'theme:dark' : 'theme:light'); // title bar to match
   }
 
   saveState() {

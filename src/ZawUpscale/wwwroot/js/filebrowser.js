@@ -1,17 +1,33 @@
-// A file / folder picker backed by the local backend: the page can't learn local paths from the browser's own
-// dialogs, and the upscaler works on files in place. Modes: 'images' (one or more images), 'folder', 'onnx'.
-import { get, urlWithToken } from './api.js';
+// File and folder pickers. In the native window these are the system's own dialogs; in a browser window the page
+// can't learn local paths from the browser's dialogs, so a picker backed by the local backend stands in.
+// Modes: 'images' (one or more images), 'folder', 'onnx'.
+import { get, post, urlWithToken } from './api.js';
 import { h, fmtBytes } from './util.js';
 import { icon } from './icons.js';
 import { modal } from './dialogs.js';
 
 let placesCache = null;
+let native = false;
+
+/** Called at start-up with whether the native open dialogs are available. */
+export function useNativeDialogs(on) { native = !!on; }
 
 /**
  * Resolves with an array of paths ('images', 'onnx') or a folder path ('folder'), or null when cancelled.
  * `start` is the folder to open in; `onDir` is told about every folder visited (to remember the last one).
  */
-export async function browse({ mode = 'images', title, start, onDir, multiple = true } = {}) {
+export async function browse(opts = {}) {
+  if (native) {
+    const { mode = 'images', title, start, onDir, multiple = true } = opts;
+    const r = await post('/dialog/open', { mode, title, start, multiple });
+    if (!r) return null;
+    onDir?.(r.dir);
+    return mode === 'folder' ? r.paths[0] : r.paths;
+  }
+  return browseHere(opts);
+}
+
+async function browseHere({ mode = 'images', title, start, onDir, multiple = true } = {}) {
   const places = placesCache ??= await get('/fs/places').catch(() => []);
   let cur = null, entries = [], selected = new Set(), anchor = -1;
   const pathInp = h('input', { class: 'inp no-enter', spellcheck: false, placeholder: 'Folder path' });

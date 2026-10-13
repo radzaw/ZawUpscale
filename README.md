@@ -4,10 +4,10 @@ An AI image upscaler for single images and whole folders, in the spirit of Upsca
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/zawupscale-dark.png">
-  <img src="assets/screenshots/zawupscale-light.png" alt="ZawUpscale: settings on the left; on the right a screenshot upscaled 4×, with a slider wiping between the blurry original and the sharp result">
+  <img src="assets/screenshots/zawupscale-light.png" alt="ZawUpscale: settings on the left; on the right a 500 × 333 photo of a fox kit upscaled 4× with Real-ESRGAN x4plus, with a slider wiping between the blurry original and the sharp result">
 </picture>
 
-The backend is an ASP.NET Core app that runs the AI models with [ONNX Runtime](https://onnxruntime.ai) and reads and writes the images in place. The UI is plain HTML/CSS/JS embedded in the executable. ZawUpscale opens it in a chromeless **app-mode window** of an installed Chromium browser (Chrome, Edge, Chromium or Brave), so it looks and behaves like a desktop window on **Windows, Linux and macOS**. Closing the window quits the app.
+The backend is an ASP.NET Core app that runs the AI models with [ONNX Runtime](https://onnxruntime.ai) and reads and writes the images in place. The UI is plain HTML/CSS/JS embedded in the executable, shown in a **native window** through [Photino](https://www.tryphotino.io) with the operating system's own web view: WebView2 on Windows, WKWebView on macOS and WebKitGTK on Linux. It has native open dialogs, follows the light or dark theme in its title bar, and closing it quits the app. Where the web view isn't available (WebKitGTK not installed, or no display), ZawUpscale falls back to an app-mode window of an installed Chromium browser (Chrome, Edge, Chromium or Brave).
 
 ## Features
 
@@ -65,9 +65,10 @@ Everything is kept in the configuration directory (`%APPDATA%\ZawUpscale` on Win
 | `models/` | The downloaded models, and your own `.onnx` files |
 | `state.json` | Upscale settings, preferences, last folders |
 | `inbox/` | Copies of images dropped on or pasted into the window (cleared after a week) |
-| `browser/` | The app window's browser profile |
+| `webview/` | The native window's web view data and icon |
+| `browser/` | The browser profile, when the fallback browser window is used |
 
-The originals are never changed. Results of dropped and pasted images are saved in `Pictures/ZawUpscale` unless you choose an output folder: the browser doesn't tell the app where a dropped file came from.
+The originals are never changed. Results of dropped and pasted images are saved in `Pictures/ZawUpscale` unless you choose an output folder: the web view doesn't tell the app where a dropped file came from. Opening images with Ctrl+O or the Open buttons uses the original files and puts the results next to them.
 
 ## Security
 
@@ -77,7 +78,7 @@ The originals are never changed. Results of dropped and pasted images are saved 
 
 ## Requirements
 
-- To run a published build: nothing (self-contained), plus a Chromium-based browser for the app window. Without one the UI opens in the default browser.
+- To run a published build: nothing on Windows 10 and 11 (self-contained; the WebView2 runtime comes with Windows) or macOS. On Linux the native window needs WebKitGTK 4.1 and libnotify (`sudo apt install libwebkit2gtk-4.1-0 libnotify4` on Debian and Ubuntu); without them a Chromium-based browser is used for the window, or the default browser.
 - For the GPU: Windows 10 or 11 with a DirectX 12 graphics card. Otherwise the CPU is used, which is much slower. For a 1700 × 1075 image at 4×, the General model took 3 s on an RTX 5060 Ti and 17 s on a 16-thread CPU; x4plus took about 4½ minutes on that CPU.
 - To build: the [.NET 10 SDK](https://dotnet.microsoft.com/download).
 
@@ -89,7 +90,7 @@ dotnet run --project src/ZawUpscale
 
 On Windows, `run.bat` builds a Release build and starts it; any arguments are passed on (`run.bat --no-browser`).
 
-Options (`ZawUpscale --help`): `--port <n>`, `--no-browser` (print the URL instead of opening a window), `--keep-alive`, `--browser <path>`, `--config <dir>`, `--token <value>`.
+Options (`ZawUpscale --help`): `--port <n>`, `--no-browser` (print the URL instead of opening a window), `--use-browser` (a browser app window instead of the native window), `--browser <path>`, `--keep-alive` (with a browser window), `--config <dir>`, `--token <value>`.
 
 ## Build standalone executables
 
@@ -125,7 +126,8 @@ Unit tests cover tiling (compared pixel for pixel with an exact reference, for m
 ```
 src/ZawUpscale/
   Program.cs, AppHost.cs, AppOptions.cs   host, token check, command line options
-  BrowserLauncher.cs, Heartbeat.cs        app-mode window; quit when the last window closes
+  AppWindow.cs                            the native window (Photino) and its open dialogs
+  BrowserLauncher.cs, Heartbeat.cs        fallback browser window; quit when the last one closes
   Api.cs                                  /api endpoints
   Cli.cs                                  the upscale / models / download commands
   Upscaler.cs                             tiling, multi-pass planning, alpha
@@ -138,7 +140,7 @@ src/ZawUpscale/
   wwwroot/                                the UI (embedded into the executable)
     js/app.js                             layout, menus, settings panel, batches, drop and paste
     js/viewer.js                          before / after viewer
-    js/filebrowser.js                     open dialogs
+    js/filebrowser.js                     open dialogs (native, or a built-in file browser)
     js/tools.js                           models, preferences, about
 tests/ZawUpscale.Tests/                   xUnit tests
 ```
@@ -146,3 +148,7 @@ tests/ZawUpscale.Tests/                   xUnit tests
 ## Credits
 
 The built-in models are [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) by Xintao Wang et al. (BSD-3-Clause), in ONNX conversions published on Hugging Face by [jonathanst29](https://huggingface.co/jonathanst29/tinier-upscale-models) and [SkillSafe](https://huggingface.co/skillsafe-ai/realesrgan-x4plus-anime-6b).
+
+The native window uses [Photino](https://github.com/tryphotino/photino.NET) (Apache-2.0).
+
+The fox photo in the screenshot is [Red Fox Mom and Kit](https://commons.wikimedia.org/wiki/File:Red_Fox_Mom_and_Kit_(53611640425).jpg) by Erin Strand, U.S. Fish and Wildlife Service (public domain), reduced to 500 × 333 before upscaling.

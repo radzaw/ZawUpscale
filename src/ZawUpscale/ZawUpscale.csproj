@@ -30,6 +30,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.12" />
+    <PackageReference Include="Photino.NET" Version="4.0.16" />
     <PackageReference Include="SkiaSharp" Version="4.153.1" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.153.1" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" Condition="'$(ZawTargetsWindows)' == 'true'" />
@@ -41,6 +42,8 @@
     <Content Remove="wwwroot\**" />
     <None Remove="wwwroot\**" />
     <EmbeddedResource Include="wwwroot\**" />
+    <!-- The native window loads its icon from a file. -->
+    <EmbeddedResource Include="zawupscale.ico" LogicalName="zawupscale.ico" />
   </ItemGroup>
 
   <ItemGroup>

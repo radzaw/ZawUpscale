@@ -10,6 +10,7 @@ public sealed class ApiException(string message) : Exception(message);
 
 public sealed record PathRequest(string Path);
 public sealed record ScanRequest(List<string> Inputs, bool Recursive, string? NameTemplate = null);
+public sealed record DialogRequest(string Mode, string? Title, string? Start, bool Multiple = true);
 
 public static class Api
 {
@@ -102,6 +103,19 @@ public static class Api
         api.MapPost("/models/add", (PathRequest r, ModelStore m) => RunSync(() => new { id = m.AddFile(r.Path) }));
 
         // ---- files ----
+        // Native open dialogs (only in the native window). Null when cancelled; dir is the folder to remember.
+        api.MapPost("/dialog/open", (DialogRequest r, AppWindow w) => RunSync(() =>
+        {
+            var paths = r.Mode switch
+            {
+                "folder" => w.OpenFolder(r.Title ?? "Choose a folder", r.Start),
+                "onnx" => w.OpenFiles(r.Title ?? "Add an ONNX model", r.Start, false, [("ONNX models", [".onnx"])]),
+                "images" => w.OpenFiles(r.Title ?? "Open images", r.Start, r.Multiple, [("Images", ImageIO.InputExtensions)]),
+                _ => throw new ApiException($"Unknown dialog \"{r.Mode}\"."),
+            };
+            if (paths == null) return null;
+            return new { paths, dir = r.Mode == "folder" ? paths[0] : Path.GetDirectoryName(paths[0]) };
+        }));
         api.MapGet("/fs/places", () => RunSync(Files.Places));
         api.MapGet("/fs/list", (string path, bool? models) => RunSync(() => Files.List(path, models == true)));
         api.MapPost("/fs/scan", (ScanRequest r, ModelStore m) => RunSync(() => Files.Scan(r.Inputs ?? [], r.Recursive, r.NameTemplate, m.List().Select(x => x.Id))));

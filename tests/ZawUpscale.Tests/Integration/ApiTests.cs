@@ -61,6 +61,11 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.True(custom.GetProperty("installed").GetBoolean());
         Assert.False(custom.GetProperty("builtIn").GetBoolean());
         Assert.False((await app.PostAsync("/models/no-such-model/download")).Ok);
+
+        // Native dialogs exist only in the native window; without it the call fails at once.
+        var dialog = await app.PostAsync("/dialog/open", new { mode = "images" });
+        Assert.False(dialog.Ok);
+        Assert.Contains("native window", dialog.Error);
     }
 
     [Fact]
