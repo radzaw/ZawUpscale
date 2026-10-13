@@ -72,8 +72,13 @@ public sealed class Files(AppOptions opts)
     /// Expands the inputs (files and folders) into the images to upscale. Rel is the path below the folder
     /// it was found in, so a batch can keep its folder structure in the output folder.
     /// </summary>
-    public static ScanResult Scan(IEnumerable<string> inputs, bool recursive, string? nameTemplate = null)
+    public static ScanResult Scan(IEnumerable<string> inputs, bool recursive, string? nameTemplate = null, IEnumerable<string>? modelIds = null)
     {
+        // Results folders ("realesr-general-x4v3_x4") found below an opened folder hold earlier results.
+        var resultsFolder = modelIds?.Any() == true
+            ? new Regex($"^(?:{string.Join('|', modelIds.Select(Regex.Escape))})_x[0-9]+(?:\\.[0-9]+)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+            : null;
+        var inResults = 0;
         var items = new List<JobItemRequest>();
         var seen = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         var skipped = 0;
@@ -93,8 +98,10 @@ public sealed class Files(AppOptions opts)
                 foreach (var f in Directory.EnumerateFiles(p, "*", opt).Order(StringComparer.OrdinalIgnoreCase))
                 {
                     if (!ImageIO.IsImage(f)) continue;
+                    var rel = Path.GetRelativePath(p, f);
+                    if (resultsFolder != null && Path.GetDirectoryName(rel)!.Split(Path.DirectorySeparatorChar).Any(resultsFolder.IsMatch)) { inResults++; continue; }
                     if (items.Count >= MaxScan) throw new ApiException($"More than {MaxScan} images; choose a smaller folder.");
-                    if (seen.Add(f)) { items.Add(new JobItemRequest(f, Path.GetRelativePath(p, f))); bytes += new FileInfo(f).Length; fromFolder.Add(f); }
+                    if (seen.Add(f)) { items.Add(new JobItemRequest(f, rel)); bytes += new FileInfo(f).Length; fromFolder.Add(f); }
                 }
             }
             else throw new ApiException($"Not found: {p}");
@@ -116,13 +123,13 @@ public sealed class Files(AppOptions opts)
                 bytes = items.Sum(i => new FileInfo(i.Path).Length);
             }
         }
-        return new ScanResult(items, skipped, bytes, results);
+        return new ScanResult(items, skipped, bytes, results + inResults);
     }
 
     /// <summary>A regex matching file names made by the output name pattern, capturing the original's name; null if the pattern has no {name}.</summary>
     internal static Regex? PreviousResults(string? nameTemplate)
     {
-        var t = string.IsNullOrWhiteSpace(nameTemplate) ? "{name}_x{scale}" : nameTemplate.Trim();
+        var t = string.IsNullOrWhiteSpace(nameTemplate) ? "{name}" : nameTemplate.Trim();
         var parts = Regex.Split(t, @"(\{name\}|\{scale\}|\{model\})", RegexOptions.IgnoreCase);
         if (!parts.Any(x => x.Equals("{name}", StringComparison.OrdinalIgnoreCase)) || t.Equals("{name}", StringComparison.OrdinalIgnoreCase)) return null;
         var named = false;

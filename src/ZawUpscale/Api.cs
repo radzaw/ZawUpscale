@@ -104,7 +104,7 @@ public static class Api
         // ---- files ----
         api.MapGet("/fs/places", () => RunSync(Files.Places));
         api.MapGet("/fs/list", (string path, bool? models) => RunSync(() => Files.List(path, models == true)));
-        api.MapPost("/fs/scan", (ScanRequest r) => RunSync(() => Files.Scan(r.Inputs ?? [], r.Recursive, r.NameTemplate)));
+        api.MapPost("/fs/scan", (ScanRequest r, ModelStore m) => RunSync(() => Files.Scan(r.Inputs ?? [], r.Recursive, r.NameTemplate, m.List().Select(x => x.Id))));
         api.MapPost("/fs/reveal", (PathRequest r) => RunSync(() => { Files.Reveal(r.Path); return null; }));
         api.MapPost("/fs/open", (PathRequest r) => RunSync(() => { Files.Open(r.Path); return null; }));
         api.MapGet("/fs/info", (string path) => RunSync(() =>

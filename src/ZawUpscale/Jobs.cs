@@ -12,10 +12,10 @@ public sealed record UpscaleSettings
     /// <summary>"auto" (keep the input's format), "png", "jpg" or "webp".</summary>
     public string Format { get; init; } = "auto";
     public int Quality { get; init; } = 92;
-    /// <summary>Empty: next to each input image (dropped images go to Pictures/ZawUpscale).</summary>
+    /// <summary>Empty: a "{model}_x{scale}" subfolder of the opened folder (dropped images go to Pictures/ZawUpscale).</summary>
     public string? OutputDir { get; init; }
     /// <summary>File name without extension; {name}, {scale} and {model} are replaced.</summary>
-    public string NameTemplate { get; init; } = "{name}_x{scale}";
+    public string NameTemplate { get; init; } = "{name}";
     /// <summary>When the output exists: "skip", "overwrite" or "rename".</summary>
     public string Existing { get; init; } = "skip";
     /// <summary>Tile size in pixels; 0 picks one for the device.</summary>
@@ -120,7 +120,7 @@ public sealed class Jobs : IDisposable
         var format = (s.Format ?? "auto").ToLowerInvariant();
         if (format == "jpeg") format = "jpg";
         if (format != "auto" && !ImageIO.OutputFormats.Contains(format)) throw new ApiException($"Unknown output format \"{s.Format}\".");
-        var template = string.IsNullOrWhiteSpace(s.NameTemplate) ? "{name}_x{scale}" : s.NameTemplate.Trim();
+        var template = string.IsNullOrWhiteSpace(s.NameTemplate) ? "{name}" : s.NameTemplate.Trim();
         if (template.IndexOfAny(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) >= 0)
             throw new ApiException("The file name pattern can't contain / \\ : * ? \" < > |.");
         if (s.Existing is not ("skip" or "overwrite" or "rename")) throw new ApiException($"Unknown option \"{s.Existing}\" for existing files.");
@@ -130,6 +130,9 @@ public sealed class Jobs : IDisposable
     }
 
     public static string FormatScale(double scale) => scale.ToString("0.##", CultureInfo.InvariantCulture);
+
+    /// <summary>The subfolder results go in when no output folder is chosen, e.g. "realesr-general-x4v3_x4".</summary>
+    public static string ResultsFolder(string model, double scale) => $"{model}_x{FormatScale(scale)}";
 
     /// <summary>Output format for an input file: the chosen one, or the input's own (PNG for formats we can't write).</summary>
     public static string FormatFor(string input, string format)
@@ -147,16 +150,20 @@ public sealed class Jobs : IDisposable
     internal string OutputPath(JobItemRequest it, UpscaleSettings s)
     {
         var input = Path.GetFullPath(it.Path);
+        var inputDir = Path.GetDirectoryName(input)!;
+        // Keep the folder structure of a recursive batch.
+        var relDir = string.IsNullOrEmpty(it.Rel) ? "" : Path.GetDirectoryName(it.Rel) ?? "";
+        if (relDir.Contains("..")) relDir = "";
         string dir;
-        if (s.OutputDir != null)
-        {
-            // Keep the folder structure of a recursive batch.
-            var relDir = string.IsNullOrEmpty(it.Rel) ? "" : Path.GetDirectoryName(it.Rel) ?? "";
-            if (relDir.Contains("..")) relDir = "";
-            dir = Path.Combine(s.OutputDir, relDir);
-        }
+        if (s.OutputDir != null) dir = Path.Combine(s.OutputDir, relDir);
         else if (IsUnder(input, inbox)) dir = DefaultOutputDir();
-        else dir = Path.GetDirectoryName(input)!;
+        else
+        {
+            // A subfolder of the folder that was opened, named after the model and scale.
+            var suffix = relDir == "" ? "" : Path.DirectorySeparatorChar + relDir;
+            var root = suffix != "" && inputDir.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) ? inputDir[..^suffix.Length] : inputDir;
+            dir = Path.Combine(root, ResultsFolder(s.Model, s.Scale), root == inputDir ? "" : relDir);
+        }
         var name = s.NameTemplate
             .Replace("{name}", Path.GetFileNameWithoutExtension(input), StringComparison.OrdinalIgnoreCase)
             .Replace("{scale}", FormatScale(s.Scale), StringComparison.OrdinalIgnoreCase)

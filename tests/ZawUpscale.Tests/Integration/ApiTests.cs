@@ -79,18 +79,20 @@ public sealed class ApiTests : IAsyncLifetime
             var img = ImageIO.Load(output);
             Assert.Equal((it.GetProperty("inWidth").GetInt32() * 2, it.GetProperty("inHeight").GetInt32() * 2), (img.Width, img.Height));
         }
-        var one = ImageIO.Load(Path.Combine(pics, "one_x2.png"));
+        var results = Path.Combine(pics, "test-x2_x2");
+        var one = ImageIO.Load(Path.Combine(results, "one.png"));
         Assert.Equal(TestImages.Nearest(TestImages.Pattern(40, 30), 2).Pixels, one.Pixels);
-        Assert.True(ImageIO.Load(Path.Combine(pics, "two_x2.png")).HasAlpha());
+        Assert.True(ImageIO.Load(Path.Combine(results, "two.png")).HasAlpha());
 
-        // Again: the results are recognised in the folder and the originals skipped.
-        scan = (await app.PostAsync("/fs/scan", new { inputs = new[] { pics }, recursive = false, nameTemplate = "{name}_x{scale}" })).Expect();
+        // Again, with subfolders: the results folder is left out and the originals skipped.
+        scan = (await app.PostAsync("/fs/scan", new { inputs = new[] { pics }, recursive = true, nameTemplate = "{name}_x{scale}" })).Expect();
+        Assert.Equal(2, scan.GetProperty("items").GetArrayLength());
         Assert.Equal(2, scan.GetProperty("previousResults").GetInt32());
         job = await RunJob(new { items = scan.GetProperty("items"), settings = Settings() });
         Assert.All(job.GetProperty("items").EnumerateArray(), it => Assert.Equal("skipped", it.GetProperty("status").GetString()));
 
         job = await RunJob(new { items = new[] { new { path = Path.Combine(pics, "one.png") } }, settings = Settings("rename") });
-        Assert.EndsWith("one_x2 (2).png", job.GetProperty("items")[0].GetProperty("output").GetString());
+        Assert.EndsWith(Path.Combine("test-x2_x2", "one (2).png"), job.GetProperty("items")[0].GetProperty("output").GetString());
     }
 
     [Fact]

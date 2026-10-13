@@ -23,7 +23,7 @@ The backend is an ASP.NET Core app that runs the AI models with [ONNX Runtime](h
 - **Transparency** is kept: the alpha channel is resized alongside the result. **EXIF orientation** is applied, so phone photos come out the right way up.
 - **Compare**: a before/after slider, side by side, or either image alone, with zoom (mouse wheel, 1:1, fit) and pan. When zoomed in to 200% or more, pixels are shown sharply.
 - **Batches**: a grid of thumbnails with live progress, status and timing per image. Click a finished image to compare it. One failing image doesn't stop the rest.
-- **Output**: the same format as the original, or PNG, JPEG or WebP (with a quality setting, where WebP at 100 is lossless), saved next to the original or in a folder of your choice (keeping the subfolder structure). The file name follows a pattern: `{name}_x{scale}` by default, with `{name}`, `{scale}` and `{model}` filled in. Existing files can be skipped (so an interrupted batch can simply be run again), overwritten or kept with a number added. Earlier results lying in a folder (`photo_x4.png` next to `photo.jpg`) aren't picked up as new inputs.
+- **Output**: the same format as the original, or PNG, JPEG or WebP (with a quality setting, where WebP at 100 is lossless), saved in a subfolder of the opened folder named after the model and scale (`realesr-general-x4v3_x4`), or in a folder of your choice (keeping the subfolder structure either way). Results keep the original's name by default; a pattern can change it, with `{name}`, `{scale}` and `{model}` filled in (`{name}_x{scale}` gives `photo_x4.png`). Existing files can be skipped (so an interrupted batch can simply be run again), overwritten or kept with a number added. Earlier results (those subfolders, or `photo_x4.png` next to `photo.jpg`) aren't picked up as new inputs.
 - **Command line**: `ZawUpscale upscale <files or folders>` for scripts (see below).
 - **Light and dark themes** (or follow the system), and keyboard shortcuts.
 
@@ -45,7 +45,7 @@ The backend is an ASP.NET Core app that runs the AI models with [ONNX Runtime](h
 ## Command line
 
 ```sh
-ZawUpscale upscale photo.jpg                         # photo_x4.jpg next to it
+ZawUpscale upscale photo.jpg                         # realesr-general-x4v3_x4/photo.jpg
 ZawUpscale upscale ~/Pictures/scans -r -s 2 -f png -o ~/Pictures/scans-2x
 ZawUpscale upscale art.png -m realesrgan-x4plus-anime -n "{name}-{model}"
 ZawUpscale models                                    # list the models (* = installed)

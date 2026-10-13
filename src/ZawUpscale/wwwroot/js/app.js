@@ -9,7 +9,7 @@ import { modelsDialog, preferencesDialog, shortcutsDialog, aboutDialog } from '.
 
 const DEFAULT_PREFS = { theme: 'system', panelWidth: 340, viewMode: 'slider', pixelated: true };
 const DEFAULT_SETTINGS = {
-  model: 'realesr-general-x4v3', scale: 4, format: 'auto', quality: 92, outputDir: '', nameTemplate: '{name}_x{scale}',
+  model: 'realesr-general-x4v3', scale: 4, format: 'auto', quality: 92, outputDir: '', nameTemplate: '{name}',
   existing: 'skip', tile: 0, device: 'auto',
 };
 const SCALES = [2, 3, 4, 8];
@@ -50,6 +50,9 @@ class App {
     }
     this.prefs = this.state.prefs = { ...DEFAULT_PREFS, ...this.state.prefs };
     this.settings = this.state.settings = { ...DEFAULT_SETTINGS, ...this.state.settings };
+    // Version 2: results keep the original's name (they go in a {model}_x{scale} folder); drop the old default pattern.
+    if ((this.state.version || 1) < 2 && this.settings.nameTemplate === '{name}_x{scale}') this.settings.nameTemplate = '{name}';
+    this.state.version = 2;
     if (!this.system.devices.some(d => d.id === this.settings.device)) this.settings.device = 'auto';
     this.applyPrefs();
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyPrefs());
@@ -257,7 +260,7 @@ class App {
           h('div', { class: 'source-info' },
             h('div', { class: 'source-name', title: s.folder || '' }, s.label),
             h('div', { class: 'source-meta' }, `${plural(s.items.length, 'image')} · ${fmtBytes(s.bytes)}`),
-            s.previous ? h('div', { class: 'source-meta', title: 'Files named like results of other images here are not upscaled again' }, `${plural(s.previous, 'earlier result')} left out`) : null,
+            s.previous ? h('div', { class: 'source-meta', title: 'Earlier results (in model folders, or named like results of other images here) are not upscaled again' }, `${plural(s.previous, 'earlier result')} left out`) : null,
             s.folder ? h('div', { class: 'source-meta', title: s.folder }, dirName(s.folder)) : null),
           close), opts);
       }
@@ -312,13 +315,13 @@ class App {
     const s = this.settings;
     this.fmtSeg = h('div', { class: 'seg' });
     this.qualityRow = h('div', { class: 'field' });
-    this.outDir = h('input', { class: 'inp', spellcheck: false, placeholder: 'Next to the original', value: s.outputDir || '' });
+    this.outDir = h('input', { class: 'inp', spellcheck: false, value: s.outputDir || '' });
     this.outDir.addEventListener('input', () => { s.outputDir = this.outDir.value.trim(); this.saveStateSoon(); this.renderOutputExtras(); });
     const pickDir = h('button', { class: 'iconbtn', title: 'Choose the output folder', html: icon('folderopen'), onclick: async () => {
       const d = await browse({ mode: 'folder', title: 'Save results in', start: s.outputDir || this.state.lastOutDir || this.state.lastDir });
       if (d) { s.outputDir = d; this.state.lastOutDir = d; this.outDir.value = d; this.saveStateSoon(); this.renderOutputExtras(); }
     } });
-    this.name = h('input', { class: 'inp', spellcheck: false, value: s.nameTemplate, placeholder: '{name}_x{scale}' });
+    this.name = h('input', { class: 'inp', spellcheck: false, value: s.nameTemplate, placeholder: '{name}' });
     this.name.addEventListener('input', () => { s.nameTemplate = this.name.value; this.saveStateSoon(); this.renderOutputExtras(); });
     this.namePreview = h('div', { class: 'result-size' });
     this.outHint = h('div', { class: 'result-size' });
@@ -347,14 +350,16 @@ class App {
     const sample = this.source?.kind === 'image' ? this.source.path : this.source?.items?.[0]?.path;
     if (sample) {
       const base = baseName(sample).replace(/\.[^.]+$/, '');
-      const tpl = s.nameTemplate?.trim() || '{name}_x{scale}';
+      const tpl = s.nameTemplate?.trim() || '{name}';
       const name = tpl.replace(/\{name\}/gi, base).replace(/\{scale\}/gi, fmtScale(s.scale)).replace(/\{model\}/gi, s.model) + '.' + formatFor(sample, s.format);
       this.namePreview.replaceChildren('e.g. ', h('b', null, name));
     } else {
       this.namePreview.replaceChildren('{name}, {scale} and {model} are filled in.');
     }
     const inbox = this.source?.uploaded;
-    this.outHint.textContent = s.outputDir ? '' : inbox ? `Dropped images are saved in ${this.system.defaultOutputDir}` : '';
+    const sub = `${s.model}_x${fmtScale(s.scale)}`;
+    this.outDir.placeholder = `Subfolder ${sub}`;
+    this.outHint.textContent = s.outputDir ? '' : inbox ? `Dropped images are saved in ${this.system.defaultOutputDir}` : `Saved in a ${sub} folder inside the opened folder`;
     this.outHint.style.display = this.outHint.textContent ? '' : 'none';
   }
 
@@ -476,7 +481,7 @@ class App {
     this.stageBody.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'drop-card' },
       h('div', { class: 'big', html: icon('sparkle') }),
       h('h2', null, 'Upscale images with AI'),
-      h('p', null, 'Drop images or a folder here, paste an image, or open files from your computer. Results are saved next to the originals.'),
+      h('p', null, 'Drop images or a folder here, paste an image, or open files from your computer. Results are saved in a subfolder named after the model and scale.'),
       h('div', { class: 'btns' },
         h('button', { class: 'btn primary', onclick: () => this.openImages(), html: icon('image') + '<span>Open images…</span>' }),
         h('button', { class: 'btn', onclick: () => this.openFolder(), html: icon('folderopen') + '<span>Open folder…</span>' })),

@@ -14,10 +14,10 @@ public static class Cli
           ZawUpscale upscale <file|folder>... [options]
             -m, --model <id>      Model (default: realesr-general-x4v3; see "ZawUpscale models")
             -s, --scale <n>       Scale factor, 1-32 (default 4)
-            -o, --output <dir>    Output folder (default: next to each image)
+            -o, --output <dir>    Output folder (default: a {model}_x{scale} subfolder)
             -f, --format <fmt>    auto, png, jpg or webp (default auto: same as the input)
             -q, --quality <n>     JPEG / WebP quality, 1-100 (default 92; WebP 100 is lossless)
-            -n, --name <pattern>  Output name: {name}, {scale}, {model} (default {name}_x{scale})
+            -n, --name <pattern>  Output name: {name}, {scale}, {model} (default {name})
             -r, --recursive       Include subfolders
             --overwrite           Replace existing outputs (default: skip them)
             --tile <n>            Tile size in pixels (default: automatic)
@@ -127,7 +127,7 @@ public static class Cli
         var store = new ModelStore(opts, loggers.CreateLogger<ModelStore>());
         using var engine = new Engine(loggers.CreateLogger<Engine>());
         using var jobs = new Jobs(engine, store, opts, loggers.CreateLogger<Jobs>());
-        var scan = Files.Scan(inputs, recursive, s.NameTemplate);
+        var scan = Files.Scan(inputs, recursive, s.NameTemplate, store.List().Select(m => m.Id));
         if (scan.Items.Count == 0) throw new ApiException("No images found.");
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; foreach (var j in jobs.List()) jobs.Cancel(j.Id); };
 

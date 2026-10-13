@@ -27,13 +27,22 @@ public sealed class NamingTests : IDisposable
     string Out(string input, UpscaleSettings s, string? rel = null) => jobs.OutputPath(new JobItemRequest(input, rel), Jobs.Validate(s));
 
     [Fact]
-    public void Results_go_next_to_the_original_by_default()
+    public void Results_go_in_a_model_and_scale_subfolder_by_default()
     {
         var input = Path.Combine(root, "pics", "cat.jpeg");
-        Assert.Equal(Path.Combine(root, "pics", "cat_x4.jpg"), Out(input, new UpscaleSettings()));
-        Assert.Equal(Path.Combine(root, "pics", "cat_x2.5.png"), Out(input, new UpscaleSettings { Scale = 2.5, Format = "png" }));
-        Assert.Equal(Path.Combine(root, "pics", "cat_x4.png"), Out(Path.Combine(root, "pics", "cat.bmp"), new UpscaleSettings()));
-        Assert.Equal(Path.Combine(root, "pics", "cat_x4.webp"), Out(Path.Combine(root, "pics", "cat.webp"), new UpscaleSettings()));
+        var sub = Path.Combine(root, "pics", "realesr-general-x4v3_x4");
+        Assert.Equal(Path.Combine(sub, "cat.jpg"), Out(input, new UpscaleSettings()));
+        Assert.Equal(Path.Combine(root, "pics", "anime_x2.5", "cat.png"), Out(input, new UpscaleSettings { Model = "anime", Scale = 2.5, Format = "png" }));
+        Assert.Equal(Path.Combine(sub, "cat.png"), Out(Path.Combine(root, "pics", "cat.bmp"), new UpscaleSettings()));
+        Assert.Equal(Path.Combine(sub, "cat.webp"), Out(Path.Combine(root, "pics", "cat.webp"), new UpscaleSettings(), "cat.webp"));
+    }
+
+    [Fact]
+    public void A_recursive_batch_gets_one_subfolder_in_the_opened_folder()
+    {
+        var input = Path.Combine(root, "pics", "2024", "may", "dog.png");
+        Assert.Equal(Path.Combine(root, "pics", "realesr-general-x4v3_x4", "2024", "may", "dog.png"),
+            Out(input, new UpscaleSettings(), Path.Combine("2024", "may", "dog.png")));
     }
 
     [Fact]
@@ -88,5 +97,19 @@ public sealed class NamingTests : IDisposable
         var picked = Files.Scan([Path.Combine(dir, "a.png"), Path.Combine(dir, "a_x4.png"), Path.Combine(dir, "notes.txt")], false, "{name}_x{scale}");
         Assert.Equal(2, picked.Items.Count);
         Assert.Equal(1, picked.Skipped);
+    }
+
+    [Fact]
+    public void Recursive_scans_leave_out_results_folders()
+    {
+        var dir = Path.Combine(root, "tree");
+        foreach (var f in new[] { "a.png", Path.Combine("model-1_x4", "a_x4.png"), Path.Combine("sub", "model-1_x2.5", "b_x2.5.png"), Path.Combine("sub", "b.png"), Path.Combine("other_x4", "c.png") })
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(dir, f))!);
+            File.WriteAllBytes(Path.Combine(dir, f), [1, 2, 3]);
+        }
+        var scan = Files.Scan([dir], recursive: true, "{name}_x{scale}", ["model-1"]);
+        Assert.Equal(["a.png", Path.Combine("other_x4", "c.png"), Path.Combine("sub", "b.png")], scan.Items.Select(i => i.Rel));
+        Assert.Equal(2, scan.PreviousResults);
     }
 }
