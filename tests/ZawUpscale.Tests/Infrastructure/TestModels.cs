@@ -48,13 +48,105 @@ public static class TestModels
         return path;
     }
 
-    static byte[] Node(string op, string[] inputs, string[] outputs, byte[]? attr = null)
+    /// <summary>
+    /// A SUPIR model folder with stand-in networks that have the real ones' names, inputs and dynamic
+    /// dimensions: the encoders average 8 × 8 blocks (a strided Conv), the decoder repeats them back
+    /// (ConvTranspose), the "UNet" returns sample − control, and the text encoders repeat each token id
+    /// across the hidden size, with bigG's pooled output the largest id.
+    /// </summary>
+    public static void SupirPackage(string dir)
+    {
+        const int Float = 1, Int64 = 7;
+        Directory.CreateDirectory(Path.Combine(dir, "tokenizer"));
+        object[] img = ["batch", 3, "img_h", "img_w"], lat = ["batch", 4, "lat_h", "lat_w"];
+
+        var down = new float[4 * 3 * 64];
+        var up = new float[4 * 3 * 64];
+        for (var c = 0; c < 3; c++)
+            for (var k = 0; k < 64; k++)
+            {
+                down[(c * 3 + c) * 64 + k] = 1f / 64; // Conv weights [out 4, in 3, 8, 8]
+                up[(c * 3 + c) * 64 + k] = 1f;        // ConvTranspose weights [in 4, out 3, 8, 8]
+            }
+        byte[][] strided = [AttrInts("kernel_shape", [8, 8]), AttrInts("strides", [8, 8])];
+        var encoder = Graph([Node("Conv", ["image", "w"], ["latent"], strided)], [Tensor("w", [4, 3, 8, 8], down)],
+            [ValueInfo("image", Float, img)], [ValueInfo("latent", Float, lat)]);
+        File.WriteAllBytes(Path.Combine(dir, ZawUpscale.SupirPackage.DenoiseEncoder), encoder);
+        File.WriteAllBytes(Path.Combine(dir, ZawUpscale.SupirPackage.VaeEncoder), encoder);
+        File.WriteAllBytes(Path.Combine(dir, ZawUpscale.SupirPackage.VaeDecoder),
+            Graph([Node("ConvTranspose", ["latent", "w"], ["image"], strided)], [Tensor("w", [4, 3, 8, 8], up)],
+                [ValueInfo("latent", Float, lat)], [ValueInfo("image", Float, img)]));
+        File.WriteAllBytes(Path.Combine(dir, ZawUpscale.SupirPackage.Unet),
+            Graph([Node("Sub", ["sample", "control"], ["eps"])], [],
+                [ValueInfo("sample", Float, lat), ValueInfo("timestep", Float, ["batch"]), ValueInfo("context", Float, ["batch", 77, 2048]),
+                 ValueInfo("y", Float, ["batch", 2816]), ValueInfo("control", Float, lat), ValueInfo("control_scale", Float, [1])],
+                [ValueInfo("eps", Float, lat)]));
+
+        byte[] Text(int dim, bool pooled)
+        {
+            var nodes = new List<byte[]>
+            {
+                Node("Cast", ["input_ids"], ["f"], Attr("to", Float)),
+                Node("Unsqueeze", ["f", "axis2"], ["u"]),
+                Node("Tile", ["u", "reps"], ["hidden"]),
+            };
+            var outputs = new List<byte[]> { ValueInfo("hidden", Float, [1, 77, dim]) };
+            var inits = new List<byte[]> { TensorI64("axis2", [1], [2]), TensorI64("reps", [3], [1, 1, dim]) };
+            if (pooled)
+            {
+                nodes.Add(Node("ReduceMax", ["f"], ["m"], AttrInts("axes", [1])));
+                nodes.Add(Node("Tile", ["m", "preps"], ["pooled"]));
+                inits.Add(TensorI64("preps", [2], [1, dim]));
+                outputs.Add(ValueInfo("pooled", Float, [1, dim]));
+            }
+            return Graph(nodes, inits, [ValueInfo("input_ids", Int64, [1, 77])], outputs);
+        }
+        File.WriteAllBytes(Path.Combine(dir, ZawUpscale.SupirPackage.TextEncoderL), Text(768, false));
+        File.WriteAllBytes(Path.Combine(dir, ZawUpscale.SupirPackage.TextEncoderG), Text(1280, true));
+        File.WriteAllText(Path.Combine(dir, ZawUpscale.SupirPackage.Vocab), """{ "<|startoftext|>": 49406, "<|endoftext|>": 49407, "a</w>": 320 }""");
+        File.WriteAllText(Path.Combine(dir, ZawUpscale.SupirPackage.Merges), "#version: 0.2\n");
+        File.WriteAllText(Path.Combine(dir, ZawUpscale.SupirPackage.ManifestName),
+            """{ "format": "zawupscale-supir", "version": 1, "name": "Test SUPIR", "minSize": 64, "defaults": { "steps": 2 } }""");
+    }
+
+    static byte[] Graph(IEnumerable<byte[]> nodes, IEnumerable<byte[]> inits, IEnumerable<byte[]> inputs, IEnumerable<byte[]> outputs)
+    {
+        var graph = new Proto();
+        foreach (var n in nodes) graph.Bytes(1, n);
+        graph.String(2, "test");
+        foreach (var t in inits) graph.Bytes(5, t);
+        foreach (var i in inputs) graph.Bytes(11, i);
+        foreach (var o in outputs) graph.Bytes(12, o);
+        var opset = new Proto().String(1, "").Int(2, 13).ToArray();
+        return new Proto().Int(1, 8).Bytes(8, opset).Bytes(7, graph.ToArray()).ToArray();
+    }
+
+    static byte[] Node(string op, string[] inputs, string[] outputs, params byte[][] attrs)
     {
         var p = new Proto();
         foreach (var i in inputs) p.String(1, i);
         foreach (var o in outputs) p.String(2, o);
         p.String(4, op);
-        if (attr != null) p.Bytes(5, attr);
+        foreach (var a in attrs) p.Bytes(5, a);
+        return p.ToArray();
+    }
+
+    static byte[] AttrInts(string name, long[] values)
+    {
+        var p = new Proto().String(1, name);
+        foreach (var v in values) p.Int(8, v);
+        return p.Int(20, 7).ToArray(); // INTS
+    }
+
+    static byte[] TensorI64(string name, long[] dims, long[] data)
+    {
+        var p = new Proto();
+        foreach (var d in dims) p.Int(1, d);
+        p.Int(2, 7);
+        var raw = new byte[data.Length * 8];
+        Buffer.BlockCopy(data, 0, raw, 0, raw.Length);
+        p.String(8, name);
+        p.Bytes(9, raw);
         return p.ToArray();
     }
 

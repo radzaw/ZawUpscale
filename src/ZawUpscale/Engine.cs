@@ -4,8 +4,17 @@ using SessionOptions = Microsoft.ML.OnnxRuntime.SessionOptions;
 
 namespace ZawUpscale;
 
+/// <summary>A model the engine keeps loaded: an upscaling network or a SUPIR package.</summary>
+public interface IEngineModel : IDisposable
+{
+    /// <summary>Where it runs, e.g. "NVIDIA GeForce RTX 4070 (DirectML)" or "CPU".</summary>
+    string Device { get; }
+    /// <summary>Makes a running inference stop when <paramref name="ct"/> is cancelled.</summary>
+    IDisposable BindCancellation(CancellationToken ct);
+}
+
 /// <summary>An ONNX super-resolution network (Real-ESRGAN and similar): NCHW RGB in [0, 1], float32 or float16.</summary>
-public sealed class OnnxSrModel : ISrModel, IDisposable
+public sealed class OnnxSrModel : ISrModel, IEngineModel
 {
     readonly InferenceSession session;
     readonly string inputName, outputName;
@@ -67,7 +76,7 @@ public sealed class OnnxSrModel : ISrModel, IDisposable
         }
     }
 
-    static bool IsOutOfMemory(Exception ex)
+    internal static bool IsOutOfMemory(Exception ex)
     {
         var m = ex.Message;
         return m.Contains("memory", StringComparison.OrdinalIgnoreCase) || m.Contains("alloc", StringComparison.OrdinalIgnoreCase)
@@ -130,7 +139,7 @@ public sealed record DeviceInfo(string Id, string Name, string? Detail);
 public sealed class Engine(ILogger<Engine> log) : IDisposable
 {
     readonly Lock gate = new();
-    OnnxSrModel? loaded;
+    IEngineModel? loaded;
     string? loadedKey;
     string? lastGpuError;
 
@@ -158,14 +167,23 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
     public string? ActiveDevice { get { lock (gate) return loaded?.Device; } }
     public string? LastGpuError => lastGpuError;
 
-    public OnnxSrModel Load(string modelPath, string device)
+    public OnnxSrModel Load(string modelPath, string device) =>
+        (OnnxSrModel)Load(modelPath + "|" + device + "|" + File.GetLastWriteTimeUtc(modelPath).Ticks, () => Create(modelPath, device));
+
+    /// <summary>Loads a SUPIR model folder; the networks themselves load as they are first used.</summary>
+    public SupirModel LoadSupir(string dir, string device)
+    {
+        var manifest = Path.Combine(dir, SupirPackage.ManifestName);
+        return (SupirModel)Load(dir + "|" + device + "|" + File.GetLastWriteTimeUtc(manifest).Ticks, () => CreateSupir(dir, device));
+    }
+
+    IEngineModel Load(string key, Func<IEngineModel> create)
     {
         lock (gate)
         {
-            var key = modelPath + "|" + device + "|" + File.GetLastWriteTimeUtc(modelPath).Ticks;
             if (loaded != null && loadedKey == key) return loaded;
             Unload();
-            loaded = Create(modelPath, device);
+            loaded = create();
             loadedKey = key;
             return loaded;
         }
@@ -207,6 +225,18 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
         return new OnnxSrModel(path, cpu, "CPU");
     }
 
+    SupirModel CreateSupir(string dir, string device)
+    {
+        var package = SupirPackage.Open(dir);
+        var gpus = HasGpu ? Gpu.Adapters() : [];
+        // On the CPU a 50-step SDXL run takes hours, and float16 networks lack CPU kernels.
+        if (device == "cpu" || gpus.Count == 0)
+            throw new ApiException(HasGpu ? "SUPIR needs a GPU. Choose one as the device (in Preferences, or --device on the command line)." : "SUPIR needs a GPU, which this build can only use on Windows (DirectML).");
+        var index = device.StartsWith("gpu:") && int.TryParse(device[4..], out var n) ? n : gpus[0].Index;
+        var name = gpus.FirstOrDefault(g => g.Index == index)?.Name ?? $"GPU {index}";
+        return new SupirModel(package, () => GpuOptions(index), $"{name} (DirectML)");
+    }
+
     static SessionOptions GpuOptions(int deviceId)
     {
         // DirectML doesn't support memory patterns or parallel execution.
@@ -226,8 +256,10 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
     /// Upscales with the given model. If a tile doesn't fit in GPU memory, the tile size is halved and the
     /// image started again (the device may need a fresh session after running out of memory).
     /// </summary>
-    public RgbaImage Upscale(RgbaImage src, string modelPath, string device, double scale, int tile, IProgress<double>? progress, Action<string>? notice, CancellationToken ct)
+    public RgbaImage Upscale(RgbaImage src, string modelPath, string device, double scale, int tile, IProgress<double>? progress, Action<string>? notice, CancellationToken ct,
+        SupirSettings? supir = null)
     {
+        if (SupirPackage.IsPackage(modelPath)) return Supir(src, modelPath, device, scale, supir, progress, notice, ct);
         if (tile <= 0) tile = AutoTile(device);
         while (true)
         {
@@ -247,6 +279,39 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             catch (TileTooLargeException ex)
             {
                 throw new ApiException($"Not enough memory even with small tiles: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Restores with SUPIR. Its tiles start at SDXL's native 1024 px whatever the tile preference (smaller ones
+    /// lose quality); if they don't fit in GPU memory they are made smaller and the image started again.
+    /// </summary>
+    RgbaImage Supir(RgbaImage src, string dir, string device, double scale, SupirSettings? settings, IProgress<double>? progress, Action<string>? notice, CancellationToken ct)
+    {
+        var options = SupirPackage.Open(dir, checkFiles: false).Resolve(settings);
+        var tile = SupirUpscaler.DefaultTile;
+        while (true)
+        {
+            var model = LoadSupir(dir, device);
+            using var reg = model.BindCancellation(ct);
+            var upscaler = new SupirUpscaler(model, model.Package.MinSize);
+            try
+            {
+                var result = upscaler.Upscale(src, scale, options, tile, progress, ct);
+                log.LogInformation("SUPIR finished with seed {Seed}", upscaler.LastSeed);
+                return result;
+            }
+            catch (TileTooLargeException ex) when (tile > SupirUpscaler.MinTile)
+            {
+                tile = Math.Max(SupirUpscaler.MinTile, tile * 3 / 4 / 64 * 64);
+                log.LogWarning("Out of GPU memory ({Message}); retrying SUPIR with {Tile}px tiles", ex.Message, tile);
+                notice?.Invoke($"Out of GPU memory; retrying with {tile}px tiles.");
+                Unload();
+            }
+            catch (TileTooLargeException ex)
+            {
+                throw new ApiException($"Not enough GPU memory for SUPIR (it needs about 12 GB): {ex.Message}");
             }
         }
     }

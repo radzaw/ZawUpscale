@@ -16,6 +16,7 @@ The backend is an ASP.NET Core app that runs the AI models with [ONNX Runtime](h
   - **General (fast)**: Real-ESRGAN general v3 (4.6 MB). A good default for photos, screenshots and everyday images.
   - **Real-ESRGAN x4plus (high quality)**: the full network (64 MB), with the most detail for real-world photos. It's about ten times slower.
   - **Anime & illustration**: Real-ESRGAN x4plus anime 6B (17 MB), for clean lines and flat colors.
+  - **SUPIR** (optional): diffusion-based restoration on Stable Diffusion XL that rebuilds real detail in blurry, noisy or damaged photos. It needs a GPU with about 12 GB and takes minutes per image. Its weights are for non-commercial use only and there's no ONNX version to download, so you export it once from the original checkpoints with [tools/supir](tools/supir/README.md). With SUPIR selected, the panel shows an optional description of the image, steps, guidance and seed. More options (restoration guidance, control strength, color fix, prompts) are folded away.
   - **Your own models**: any ESRGAN-style super-resolution network exported to ONNX (an RGB input `[1, 3, H, W]` in 0–1, float32 or float16). It can take any size or a fixed tile size, and its scale (1×, 2×, 4×…) is detected automatically.
 - **Any scale from 1× to 32×**: a 4× model runs several times for 8× or 16×. For in-between scales (2×, 3×, 6×) the result is resized with a high-quality filter, and the image is shrunk *before* the last pass instead of overshooting (6× takes one 4× pass, a reduction to 1.5×, then a 4× pass, not 16× followed by throwing most of it away).
 - **GPU acceleration** on Windows through DirectML (any DirectX 12 graphics card: NVIDIA, AMD or Intel), with a choice of GPU. The CPU is used on Linux and macOS, or when you choose it.
@@ -50,9 +51,10 @@ ZawUpscale upscale ~/Pictures/scans -r -s 2 -f png -o ~/Pictures/scans-2x
 ZawUpscale upscale art.png -m realesrgan-x4plus-anime -n "{name}-{model}"
 ZawUpscale models                                    # list the models (* = installed)
 ZawUpscale download realesrgan-x4plus                # download one
+ZawUpscale upscale old-scan.jpg -m supir-v0q -s 2 --prompt "a family on a beach, 1970s photo"
 ```
 
-Options for `upscale`: `-m <model>`, `-s <scale>`, `-o <dir>`, `-f auto|png|jpg|webp`, `-q <quality>`, `-n <pattern>`, `-r` (subfolders), `--overwrite`, `--tile <px>`, `--device auto|cpu|gpu:N`. It shares the models folder with the app (or `--config <dir>`), and exits with code 1 if an image failed.
+Options for `upscale`: `-m <model>`, `-s <scale>`, `-o <dir>`, `-f auto|png|jpg|webp`, `-q <quality>`, `-n <pattern>`, `-r` (subfolders), `--overwrite`, `--tile <px>`, `--device auto|cpu|gpu:N`. SUPIR models also take `--prompt <text>`, `--negative <text>`, `--steps <n>`, `--guidance <n>`, `--restoration <n>`, `--control <n>`, `--color-fix wavelet|adain|none` and `--seed <n>`. The seed used is printed. It shares the models folder with the app (or `--config <dir>`), and exits with code 1 if an image failed.
 
 On Windows the published `ZawUpscale.exe` is a windowed app, so shells don't wait for it by default. In `cmd` and batch files use `start /wait ZawUpscale.exe upscale …`; in PowerShell pipe it (`ZawUpscale.exe upscale … | Out-Host`) to see the output and get the exit code. `dotnet run --project src/ZawUpscale -- upscale …` behaves like a normal console program.
 
@@ -62,7 +64,7 @@ Everything is kept in the configuration directory (`%APPDATA%\ZawUpscale` on Win
 
 | File | Contents |
 | --- | --- |
-| `models/` | The downloaded models, and your own `.onnx` files |
+| `models/` | The downloaded models, your own `.onnx` files, and SUPIR model folders |
 | `state.json` | Upscale settings, preferences, last folders |
 | `inbox/` | Copies of images dropped on or pasted into the window (cleared after a week) |
 | `webview/` | The native window's web view data and icon |
@@ -119,7 +121,7 @@ powershell -ExecutionPolicy Bypass -File assets/icon/build-icons.ps1
 dotnet test ZawUpscale.slnx
 ```
 
-Unit tests cover tiling (compared pixel for pixel with an exact reference, for many image and tile sizes), multi-pass planning, alpha, cancellation, EXIF orientation, the encoders, output naming and folder scans. Integration tests run the real ONNX Runtime on tiny models that the tests build themselves (a nearest-neighbour `Resize`, float32 and float16, dynamic and fixed size), then the whole backend: jobs, skipping and renaming, per-image errors, uploads, thumbnails and the API token. No network access or downloaded models are needed.
+Unit tests cover tiling (compared pixel for pixel with an exact reference, for many image and tile sizes), multi-pass planning, alpha, cancellation, EXIF orientation, the encoders, output naming and folder scans. SUPIR's pipeline (the sampling schedule, latent tiling and color fix) is checked end to end with stand-in networks written in C#, along with the CLIP tokenizer and the model folder. Integration tests run the real ONNX Runtime on tiny models that the tests build themselves (a nearest-neighbour `Resize`, float32 and float16, dynamic and fixed size), then the whole backend: jobs, skipping and renaming, per-image errors, uploads, thumbnails and the API token. No network access or downloaded models are needed.
 
 ## Project layout
 
@@ -133,7 +135,9 @@ src/ZawUpscale/
   Upscaler.cs                             tiling, multi-pass planning, alpha
   Engine.cs                               ONNX Runtime sessions, devices, out-of-memory retry
   Gpu.cs                                  DirectX adapter list (DXGI)
-  ModelStore.cs                           model catalog, downloads, custom models
+  ModelStore.cs                           model catalog, downloads, custom models, SUPIR folders
+  Supir/                                  SUPIR: model folder and settings, CLIP tokenizer,
+                                          sampler and latent tiling, ONNX Runtime sessions
   Jobs.cs                                 the job queue, output names, existing files
   Files.cs                                file browser, folder scans, drops, reveal in folder
   ImageIO.cs                              decoding, encoding, resizing, thumbnails (SkiaSharp)
@@ -143,11 +147,14 @@ src/ZawUpscale/
     js/filebrowser.js                     open dialogs (native, or a built-in file browser)
     js/tools.js                           models, preferences, about
 tests/ZawUpscale.Tests/                   xUnit tests
+tools/supir/                              export_supir.py: makes a SUPIR model folder from the original weights
 ```
 
 ## Credits
 
 The built-in models are [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) by Xintao Wang et al. (BSD-3-Clause), in ONNX conversions published on Hugging Face by [jonathanst29](https://huggingface.co/jonathanst29/tinier-upscale-models) and [SkillSafe](https://huggingface.co/skillsafe-ai/realesrgan-x4plus-anime-6b).
+
+[SUPIR](https://github.com/Fanghua-Yu/SUPIR) is by Fanghua Yu et al. The sampler and its settings follow their reference implementation. ZawUpscale contains none of its weights.
 
 The native window uses [Photino](https://github.com/tryphotino/photino.NET) (Apache-2.0).
 

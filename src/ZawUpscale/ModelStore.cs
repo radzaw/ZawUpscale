@@ -6,15 +6,16 @@ namespace ZawUpscale;
 /// <summary>A model ZawUpscale knows how to download.</summary>
 public sealed record CatalogModel(string Id, string Name, string Description, string Url, long Size, string Sha256, string License, string Source);
 
+/// <summary>A model in the list. Kind is "upscaler" (one ONNX file) or "supir" (a SUPIR folder, with its default settings).</summary>
 public sealed record ModelInfo(
     string Id, string Name, string Description, bool BuiltIn, bool Installed, long Size, string? License, string? Source,
-    DownloadState? Download);
+    DownloadState? Download, string Kind = "upscaler", SupirOptions? Supir = null, string? Error = null);
 
 public sealed record DownloadState(long Received, long Total, string? Error, bool Done);
 
 /// <summary>
 /// The models directory (config/models): the built-in catalog, downloaded on demand and checked against
-/// its SHA-256, plus any other .onnx file the user puts there.
+/// its SHA-256, plus any other .onnx file the user puts there, and SUPIR folders (made by tools/supir).
 /// </summary>
 public sealed class ModelStore
 {
@@ -56,10 +57,15 @@ public sealed class ModelStore
     {
         if (string.IsNullOrWhiteSpace(id) || id.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || id.Contains(".."))
             throw new ApiException($"Invalid model name \"{id}\".");
-        return Path.Combine(Dir, id + ".onnx");
+        var folder = Path.Combine(Dir, id);
+        return SupirPackage.IsPackage(folder) ? folder : Path.Combine(Dir, id + ".onnx");
     }
 
-    public bool IsInstalled(string id) => File.Exists(PathOf(id));
+    public bool IsInstalled(string id)
+    {
+        var path = PathOf(id);
+        return File.Exists(path) || SupirPackage.IsPackage(path);
+    }
 
     public List<ModelInfo> List()
     {
@@ -76,7 +82,26 @@ public sealed class ModelStore
             if (Catalog.Any(c => c.Id == id)) continue;
             list.Add(new ModelInfo(id, id, "Your own model (an ONNX file in the models folder).", false, true, new FileInfo(f).Length, null, null, null));
         }
+        foreach (var d in Directory.EnumerateDirectories(Dir).Where(SupirPackage.IsPackage).OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
+            list.Add(SupirInfo(d));
         return list;
+    }
+
+    static ModelInfo SupirInfo(string dir)
+    {
+        var id = Path.GetFileName(dir);
+        const string about = "SUPIR: SDXL-based restoration that rebuilds real detail in blurry, noisy or damaged photos. Slow (minutes per image) and needs a GPU with about 12 GB.";
+        try
+        {
+            var p = SupirPackage.Open(dir, checkFiles: false);
+            var missing = p.MissingFiles();
+            return new ModelInfo(id, p.Manifest.Name ?? id, p.Manifest.Description ?? about, false, missing.Count == 0, p.Size(), null, "https://github.com/Fanghua-Yu/SUPIR",
+                null, "supir", p.Defaults, missing.Count > 0 ? $"Incomplete: missing {string.Join(", ", missing)}." : null);
+        }
+        catch (ApiException ex)
+        {
+            return new ModelInfo(id, id, about, false, false, 0, null, null, null, "supir", null, ex.Message);
+        }
     }
 
     /// <summary>Starts downloading a catalog model in the background; progress shows up in <see cref="List"/>.</summary>
@@ -155,7 +180,8 @@ public sealed class ModelStore
     public void Delete(string id)
     {
         var path = PathOf(id);
-        if (File.Exists(path)) File.Delete(path);
+        if (SupirPackage.IsPackage(path)) Directory.Delete(path, recursive: true);
+        else if (File.Exists(path)) File.Delete(path);
         downloads.TryRemove(id, out _);
     }
 

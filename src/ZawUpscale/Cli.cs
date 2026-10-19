@@ -22,6 +22,15 @@ public static class Cli
             --overwrite           Replace existing outputs (default: skip them)
             --tile <n>            Tile size in pixels (default: automatic)
             --device <id>         auto, cpu or gpu:N (default auto)
+          SUPIR models (see tools/supir/README.md):
+            --prompt <text>       What the image shows, e.g. "a red fox kit in the grass"
+            --negative <text>     Negative prompt (default: the model's)
+            --steps <n>           Sampling steps, 1-200 (default 50)
+            --guidance <n>        Prompt guidance (default 7.5)
+            --restoration <n>     Restoration guidance: fewer invented details; 0 is off (default)
+            --control <n>         How closely to follow the input, 0-2 (default 1)
+            --color-fix <mode>    wavelet, adain or none (default wavelet)
+            --seed <n>            Seed (default: random; it is logged)
           ZawUpscale models                 List the models
           ZawUpscale download <id>          Download a model
         """;
@@ -98,6 +107,7 @@ public static class Cli
         var rest = new List<string>();
         var opts = Options(args, rest);
         var s = new UpscaleSettings();
+        var supir = new SupirSettings();
         var inputs = new List<string>();
         var recursive = false;
         for (var i = 0; i < rest.Count; i++)
@@ -115,15 +125,25 @@ public static class Cli
                 case "--overwrite": s = s with { Existing = "overwrite" }; break;
                 case "--tile": s = s with { Tile = int.Parse(Next()) }; break;
                 case "--device": s = s with { Device = Next() }; break;
+                case "--prompt": supir = supir with { Prompt = Next() }; break;
+                case "--negative": supir = supir with { NegativePrompt = Next() }; break;
+                case "--steps": supir = supir with { Steps = int.Parse(Next()) }; break;
+                case "--guidance": supir = supir with { Guidance = Number(Next()) }; break;
+                case "--restoration": supir = supir with { Restoration = Number(Next()) }; break;
+                case "--control": supir = supir with { Control = Number(Next()) }; break;
+                case "--color-fix": supir = supir with { ColorFix = Next() }; break;
+                case "--seed": supir = supir with { Seed = int.Parse(Next()) }; break;
                 default:
                     if (rest[i].StartsWith('-')) throw new ArgumentException($"Unknown option {rest[i]}. See ZawUpscale --help.");
                     inputs.Add(rest[i]);
                     break;
             }
         }
+        s = s with { Supir = supir };
         if (inputs.Count == 0) throw new ApiException("Nothing to upscale. Usage: ZawUpscale upscale <file|folder>... [options]");
 
-        using var loggers = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(LogLevel.Warning));
+        // Information from the engine: SUPIR logs the seed of each image.
+        using var loggers = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(LogLevel.Warning).AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>(typeof(Engine).FullName, LogLevel.Information));
         var store = new ModelStore(opts, loggers.CreateLogger<ModelStore>());
         using var engine = new Engine(loggers.CreateLogger<Engine>());
         using var jobs = new Jobs(engine, store, opts, loggers.CreateLogger<Jobs>());
@@ -156,6 +176,8 @@ public static class Cli
         Console.WriteLine($"{job.Items.Count(i => i.Status == "done")} upscaled, {job.Items.Count(i => i.Status == "skipped")} skipped, {failed} failed in {total.Elapsed.TotalSeconds:0.0} s on {job.Device ?? "-"}.");
         return failed > 0 || job.Status == "cancelled" ? 1 : 0;
     }
+
+    static double Number(string s) => double.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
 
     [DllImport("kernel32.dll")]
     static extern bool AttachConsole(int processId);

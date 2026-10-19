@@ -21,8 +21,15 @@ export function modelsDialog(app) {
           h('span', { class: 'muted num' }, fmtBytes(d.received)),
           h('button', { class: 'iconbtn', title: 'Cancel download', html: icon('close'), onclick: () => post(`/models/${m.id}/cancel`).then(load) }));
       } else if (m.installed) {
-        act = h('button', { class: 'iconbtn danger', title: 'Delete the model file', html: icon('trash'), onclick: async () => {
-          if (!await confirmDlg(`Delete the model “${m.name}”?${m.builtIn ? ' You can download it again later.' : ' The file will be removed from the models folder.'}`, { title: 'Delete model', ok: 'Delete', danger: true })) return;
+        const what = m.kind === 'supir' ? 'folder' : 'file';
+        act = h('button', { class: 'iconbtn danger', title: `Delete the model ${what}`, html: icon('trash'), onclick: async () => {
+          if (!await confirmDlg(`Delete the model “${m.name}”?${m.builtIn ? ' You can download it again later.' : ` The ${what} will be removed from the models folder.`}`, { title: 'Delete model', ok: 'Delete', danger: true })) return;
+          try { await del(`/models/${m.id}`); } catch (e) { alertError(e.message); }
+          load();
+        } });
+      } else if (m.kind === 'supir') {
+        act = h('button', { class: 'iconbtn danger', title: 'Delete the model folder', html: icon('trash'), onclick: async () => {
+          if (!await confirmDlg(`Delete the incomplete model “${m.name}”? Its folder will be removed from the models folder.`, { title: 'Delete model', ok: 'Delete', danger: true })) return;
           try { await del(`/models/${m.id}`); } catch (e) { alertError(e.message); }
           load();
         } });
@@ -31,10 +38,11 @@ export function modelsDialog(app) {
       }
       return h('tr', null,
         h('td', null,
-          h('div', null, h('b', null, m.name), m.installed ? h('span', { class: 'tag ok' }, 'Installed') : null, !m.builtIn ? h('span', { class: 'tag' }, 'Custom') : null),
+          h('div', null, h('b', null, m.name), m.installed ? h('span', { class: 'tag ok' }, 'Installed') : null, m.kind === 'supir' ? h('span', { class: 'tag' }, 'SUPIR') : !m.builtIn ? h('span', { class: 'tag' }, 'Custom') : null),
           h('div', { class: 'mdesc' }, m.description),
           d?.error ? h('div', { class: 'mdesc', style: { color: 'var(--err)' } }, 'Download failed: ' + d.error) : null,
-          m.builtIn ? h('div', { class: 'mdesc' }, `${m.license} · ${fmtBytes(m.size)} · `, h('span', { class: 'mono' }, m.id)) : h('div', { class: 'mdesc' }, fmtBytes(m.size), ' · ', h('span', { class: 'mono' }, m.id + '.onnx'))),
+          m.error ? h('div', { class: 'mdesc', style: { color: 'var(--err)' } }, m.error) : null,
+          m.builtIn ? h('div', { class: 'mdesc' }, `${m.license} · ${fmtBytes(m.size)} · `, h('span', { class: 'mono' }, m.id)) : h('div', { class: 'mdesc' }, fmtBytes(m.size), ' · ', h('span', { class: 'mono' }, m.id + (m.kind === 'supir' ? '/' : '.onnx')))),
         h('td', { class: 'act' }, act));
     }));
   };
@@ -55,7 +63,7 @@ export function modelsDialog(app) {
     width: 720,
     body: h('div', { class: 'form' },
       h('p', { class: 'hint', style: { margin: '0 0 6px' } },
-        'Models are downloaded once and kept in the models folder. You can also add your own: any ESRGAN-style super-resolution network exported to ONNX (RGB input [1, 3, H, W] in 0–1, float32 or float16). The scale is detected automatically.'),
+        'Models are downloaded once and kept in the models folder. You can also add your own: any ESRGAN-style super-resolution network exported to ONNX (RGB input [1, 3, H, W] in 0–1, float32 or float16). The scale is detected automatically. SUPIR models are folders made from the original weights by tools/supir/export_supir.py.'),
       h('table', { class: 'mtable' }, h('thead', null, h('tr', null, h('th', null, 'Model'), h('th', null, ''))), tbody)),
     buttons: [
       { label: 'Add model file…', align: 'left', onClick: async () => {
@@ -90,7 +98,7 @@ export async function preferencesDialog(app) {
       h('div', { class: 'sm-sep' }, 'Processing'),
       h('label', { class: 'frow' }, h('span', null, 'Device'), device),
       h('label', { class: 'frow' }, h('span', null, 'Tile size'), tile),
-      h('div', { class: 'hint' }, 'Images are processed in tiles. Larger tiles are a little faster but need more memory; if the GPU runs out, the tile size is halved automatically. ' +
+      h('div', { class: 'hint' }, 'Images are processed in tiles. Larger tiles are a little faster but need more memory; if the GPU runs out, the tile size is halved automatically. SUPIR has its own tiles (1024 px, smaller if memory runs out). ' +
         (app.system.gpuSupport ? 'GPUs are used through DirectML (any DirectX 12 graphics card).' : 'This build runs on the CPU.'))),
     buttons: [{ label: 'OK', primary: true, value: true }, { label: 'Cancel', value: false }],
   });
@@ -127,7 +135,7 @@ export function aboutDialog(app) {
     body: h('div', { class: 'about' }, h('img', { src: 'icon-256.png', width: 64, height: 64, alt: '' }),
       h('div', null, h('h2', null, 'ZawUpscale'),
         h('p', null, `Version ${v?.version ?? '?'}`),
-        h('p', null, 'AI image upscaling for single images and whole folders, with Real-ESRGAN models running on your GPU or CPU.'),
+        h('p', null, 'AI image upscaling for single images and whole folders, with Real-ESRGAN models running on your GPU or CPU, and SUPIR on your GPU.'),
         h('p', { class: 'muted' }, `ONNX Runtime ${v?.onnxRuntime ?? '?'} · .NET ${v?.runtime ?? ''}`),
         h('p', { class: 'muted' }, v?.os ?? ''))),
   });

@@ -21,6 +21,8 @@ public sealed record UpscaleSettings
     /// <summary>Tile size in pixels; 0 picks one for the device.</summary>
     public int Tile { get; init; }
     public string Device { get; init; } = "auto";
+    /// <summary>Options for SUPIR models (ignored by the others).</summary>
+    public SupirSettings? Supir { get; init; }
 }
 
 public sealed record JobItemRequest(string Path, string? Rel = null);
@@ -125,6 +127,7 @@ public sealed class Jobs : IDisposable
             throw new ApiException("The file name pattern can't contain / \\ : * ? \" < > |.");
         if (s.Existing is not ("skip" or "overwrite" or "rename")) throw new ApiException($"Unknown option \"{s.Existing}\" for existing files.");
         if (s.Tile is < 0 or > 4096) throw new ApiException("The tile size must be between 32 and 4096 pixels (or automatic).");
+        SupirPackage.Validate(s.Supir);
         var dir = string.IsNullOrWhiteSpace(s.OutputDir) ? null : Path.GetFullPath(s.OutputDir.Trim().Trim('"'));
         return s with { Format = format, NameTemplate = template, OutputDir = dir, Quality = Math.Clamp(s.Quality, 1, 100), Device = string.IsNullOrEmpty(s.Device) ? "auto" : s.Device };
     }
@@ -287,7 +290,7 @@ public sealed class Jobs : IDisposable
                 lock (gate) { item.InWidth = src.Width; item.InHeight = src.Height; }
                 var progress = new Progress(p => { lock (gate) item.Progress = p; });
                 var result = engine.Upscale(src, modelPath, s.Device, s.Scale, s.Tile, progress,
-                    notice => { lock (gate) job.Notice = notice; }, ct);
+                    notice => { lock (gate) job.Notice = notice; }, ct, s.Supir);
                 lock (gate) job.Device = engine.ActiveDevice;
                 ImageIO.Save(result, output, FormatFor(item.Input, s.Format), s.Quality);
                 lock (gate)

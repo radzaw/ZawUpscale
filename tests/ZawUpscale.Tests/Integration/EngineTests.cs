@@ -65,6 +65,31 @@ public sealed class EngineTests : IDisposable
     }
 
     [Fact]
+    public void Supir_networks_run_in_onnx_runtime_with_fixed_tile_shapes()
+    {
+        // On the CPU here (the app insists on a GPU), but through the same sessions, names and dimension overrides.
+        var path = Path.Combine(dir, "supir-test");
+        TestModels.SupirPackage(path);
+        var package = SupirPackage.Open(path);
+        using var model = new SupirModel(package, () => new Microsoft.ML.OnnxRuntime.SessionOptions(), "CPU");
+
+        // Each token's ViT-L features, then its bigG features; after the end token ViT-L pads with the end token, bigG with 0.
+        var text = model.EncodeText("a");
+        Assert.Equal([49406f, 320, 49407, 49407], Enumerable.Range(0, 4).Select(t => text.Context[t * 2048]));
+        Assert.Equal([49406f, 320, 49407, 0], Enumerable.Range(0, 4).Select(t => text.Context[t * 2048 + 768]));
+        Assert.All(text.Pooled, v => Assert.Equal(49407f, v));
+
+        var src = FakeSupirNetworks.BlockImage(64, 48);
+        var image = SupirUpscaler.ToTensor(src, 64, 48);
+        var back = model.Decode(model.Encode(image, 48, 64), 6, 8);
+        for (var i = 0; i < image.Length; i++) Assert.True(Math.Abs(image[i] - back[i]) < 1e-5);
+
+        // The whole pipeline, with latent tiles smaller than the image.
+        var result = new SupirUpscaler(model, package.MinSize).Upscale(FakeSupirNetworks.BlockImage(200, 136), 1, package.Resolve(new SupirSettings { Seed = 1 }), 128);
+        Assert.Equal((200, 136), (result.Width, result.Height));
+    }
+
+    [Fact]
     public void Device_list_always_offers_auto_and_cpu()
     {
         var d = Engine.Devices();

@@ -10,7 +10,7 @@ import { modelsDialog, preferencesDialog, shortcutsDialog, aboutDialog } from '.
 const DEFAULT_PREFS = { theme: 'system', panelWidth: 340, viewMode: 'slider', pixelated: true };
 const DEFAULT_SETTINGS = {
   model: 'realesr-general-x4v3', scale: 4, format: 'auto', quality: 92, outputDir: '', nameTemplate: '{name}',
-  existing: 'skip', tile: 0, device: 'auto',
+  existing: 'skip', tile: 0, device: 'auto', supir: {},
 };
 // Running in the native window (Photino injects window.external.sendMessage) rather than a browser.
 const NATIVE = typeof window.external?.sendMessage === 'function';
@@ -53,6 +53,7 @@ class App {
     }
     this.prefs = this.state.prefs = { ...DEFAULT_PREFS, ...this.state.prefs };
     this.settings = this.state.settings = { ...DEFAULT_SETTINGS, ...this.state.settings };
+    this.settings.supir = { ...this.settings.supir };
     // Version 2: results keep the original's name (they go in a {model}_x{scale} folder); drop the old default pattern.
     if ((this.state.version || 1) < 2 && this.settings.nameTemplate === '{name}_x{scale}') this.settings.nameTemplate = '{name}';
     this.state.version = 2;
@@ -288,12 +289,58 @@ class App {
       }
       const card = h('label', { class: 'mcard' + (on ? ' on' : '') + (m.installed ? '' : ' missing') },
         h('input', { type: 'radio', name: 'model', checked: on, disabled: !m.installed || this.running(), onchange: () => this.selectModel(m.id) }),
-        h('div', { class: 'mbody' }, h('div', { class: 'mname' }, m.name), h('div', { class: 'mdesc' }, m.description), extra));
+        h('div', { class: 'mbody' }, h('div', { class: 'mname' }, m.name, m.kind === 'supir' ? h('span', { class: 'tag' }, 'SUPIR') : null),
+          h('div', { class: 'mdesc' }, m.description), extra));
       return card;
     });
+    const sel = list.find(m => m.installed && m.id === this.settings.model);
     this.secModel.replaceChildren(
       this.title(2, 'AI model', h('button', { class: 'linkbtn', onclick: () => modelsDialog(this) }, 'Manage…')),
-      h('div', { class: 'models' }, cards));
+      h('div', { class: 'models' }, cards),
+      sel?.kind === 'supir' ? this.supirOptions(sel) : null);
+  }
+
+  // SUPIR's options. Empty fields use the model's defaults, shown as placeholders. Typing doesn't re-render, so focus stays.
+  supirOptions(m) {
+    const s = this.settings.supir;
+    const d = m.supir || {};
+    const disabled = this.running();
+    const set = (key, v) => {
+      if (v === '' || v == null || Number.isNaN(v)) delete s[key]; else s[key] = v;
+      this.saveStateSoon();
+    };
+    const text = (key, placeholder, rows) => {
+      const t = h('textarea', { class: 'inp wide', rows, spellcheck: false, placeholder, disabled });
+      t.value = s[key] ?? '';
+      t.addEventListener('input', () => set(key, t.value.trim()));
+      return t;
+    };
+    const num = (key, attrs, int) => {
+      const i = h('input', { class: 'inp', type: 'number', placeholder: String(d[key] ?? ''), ...attrs, value: s[key] ?? '', disabled });
+      i.addEventListener('change', () => set(key, i.value === '' ? '' : int ? Math.round(Number(i.value)) : Number(i.value)));
+      return i;
+    };
+    const field = (label, input, title) => h('div', { class: 'field', title }, h('label', null, label), input);
+    const fix = h('select', { class: 'inp', disabled }, [['', 'Default'], ['wavelet', 'Wavelet'], ['adain', 'AdaIN'], ['none', 'None']]
+      .map(([v, l]) => h('option', { value: v, selected: (s.colorFix || '') === v }, l)));
+    fix.addEventListener('change', () => set('colorFix', fix.value));
+    const more = h('details', { class: 'adv', open: !!this.supirMore, ontoggle: () => { this.supirMore = more.open; } },
+      h('summary', null, 'More SUPIR options'),
+      h('div', { class: 'grid3' },
+        field('Restoration', num('restoration', { min: 0, max: 20, step: 0.5, placeholder: d.restoration ? String(d.restoration) : 'Off' }),
+          'Pulls the early steps towards the original: fewer invented details, a little less sharpness. 0 is off.'),
+        field('Control', num('control', { min: 0, max: 2, step: 0.05 }), 'How closely the result follows the original image (0–2).'),
+        field('Color fix', fix, 'Gives the result the colors of the original, removing color shifts.')),
+      field('Quality prompt', text('qualityPrompt', d.qualityPrompt, 3)),
+      field('Negative prompt', text('negativePrompt', d.negativePrompt, 3)));
+    return h('div', { class: 'supir' },
+      field('Describe the image (optional)', text('prompt', 'e.g. a red fox kit sitting in the grass', 2), 'A short description helps SUPIR rebuild the right details.'),
+      h('div', { class: 'grid3' },
+        field('Steps', num('steps', { min: 1, max: 200, step: 1 }, true), 'More steps are slower and a little more detailed.'),
+        field('Guidance', num('guidance', { min: 0, max: 30, step: 0.5 }), 'How strongly the prompts steer the result.'),
+        field('Seed', num('seed', { min: 0, step: 1, placeholder: 'Random' }, true), 'The same seed and settings give the same result.')),
+      more,
+      h('div', { class: 'result-size' }, 'SUPIR is slow: minutes per image on a fast GPU.'));
   }
 
   renderScale() {

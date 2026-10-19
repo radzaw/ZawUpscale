@@ -144,6 +144,7 @@ kbd { font-family: var(--mono); font-size: 11px; background: var(--surface); bor
 .inp::placeholder { color: var(--faint); }
 .inp.wide { width: 100%; }
 select.inp { padding: 0 6px; }
+textarea.inp { height: auto; padding: 6px 10px; resize: vertical; line-height: 1.4; font-size: 12.5px; }
 .num-inp { width: 90px; }
 .btn {
   min-width: 80px; height: 32px; padding: 0 14px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; cursor: default;
@@ -207,6 +208,10 @@ select.inp { padding: 0 6px; }
 .mdl { margin-top: 7px; display: flex; align-items: center; gap: 8px; }
 .mdl .bar { flex: 1; }
 .mdl .err { color: var(--err); font-size: 12px; }
+.supir { margin-top: 10px; padding: 2px 10px 10px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 4px; }
+.supir details.adv { margin-top: 8px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.grid3 .inp { width: 100%; }
 
 .bar { height: 6px; border-radius: 999px; background: var(--line-soft); overflow: hidden; }
 .bar > i { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--signal); transition: width 0.2s; }
@@ -223,6 +228,7 @@ details.adv > summary { list-style: none; cursor: default; color: var(--muted); 
 details.adv > summary::-webkit-details-marker { display: none; }
 details.adv > summary::before { content: '▸'; font-size: 10px; }
 details.adv[open] > summary::before { content: '▾'; }
+details.adv[open] > summary { margin-bottom: 2px; }
 details.adv > summary:hover { color: var(--ink); }
 
 .panel-foot { flex: none; padding: 12px 16px 14px; border-top: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; gap: 8px; }
