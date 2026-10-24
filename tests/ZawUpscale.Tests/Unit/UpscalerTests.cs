@@ -30,6 +30,22 @@ public class UpscalerTests
         Assert.Equal((32, 48), model.Sizes[0]);
     }
 
+    [Theory]
+    [InlineData(70, 30, 32)]
+    [InlineData(100, 41, 33)]
+    [InlineData(20, 13, 64)]
+    public void Uniform_tiles_all_have_one_input_size_and_stitch_exactly(int w, int h, int tile)
+    {
+        // For backends that compile per input shape (Core ML): edge tiles are padded to the size of an inner one.
+        var src = TestImages.Pattern(w, h);
+        var model = new FakeModel(2, uniformTiles: true);
+        var result = new Upscaler(model).RunPass(src, tile, null, default);
+        Assert.Equal(TestImages.Nearest(src, 2).Pixels, result.Pixels);
+        Assert.Single(model.Sizes.Distinct());
+        var (sh, sw) = model.Sizes[0];
+        Assert.True(sw <= w + Upscaler.Multiple && sh <= h + Upscaler.Multiple, "no bigger than the image needs");
+    }
+
     [Fact]
     public void Fixed_size_models_get_their_exact_input_size()
     {

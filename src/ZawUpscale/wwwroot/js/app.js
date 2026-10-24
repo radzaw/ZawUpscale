@@ -206,7 +206,7 @@ class App {
   renderDevice() {
     const d = this.system.devices.find(x => x.id === this.settings.device);
     const active = this.system.activeDevice;
-    const name = active ? active.replace(/ \(DirectML\)$/, '') : d?.id === 'auto' ? (d.detail?.split(',')[0] || 'Automatic') : d?.name;
+    const name = active ? active.replace(/ \((DirectML|CUDA|CoreML)\)$/, '') : d?.id === 'auto' ? (d.detail?.split(',')[0] || 'Automatic') : d?.name;
     this.devicePill.innerHTML = icon('chip') + '<span></span>';
     this.devicePill.lastChild.textContent = name || 'Automatic';
     this.devicePill.title = `Processing on ${name || 'the automatic choice'}. Click to change.`;

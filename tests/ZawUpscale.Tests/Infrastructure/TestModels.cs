@@ -247,11 +247,12 @@ public static class TestImages
     }
 }
 
-/// <summary>An ISrModel in plain C#: nearest-neighbour by an integer factor, optionally with a fixed input size.</summary>
-public sealed class FakeModel(int scale, (int, int)? fixedSize = null) : ISrModel
+/// <summary>An ISrModel in plain C#: nearest-neighbour by an integer factor, optionally with a fixed input size or uniform tiles.</summary>
+public sealed class FakeModel(int scale, (int, int)? fixedSize = null, bool uniformTiles = false) : ISrModel
 {
     public int Scale => scale;
     public (int Width, int Height)? FixedSize => fixedSize;
+    public bool UniformTiles => uniformTiles;
     public int Calls { get; private set; }
     public List<(int H, int W)> Sizes { get; } = [];
 

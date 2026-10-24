@@ -32,6 +32,30 @@ public sealed class EngineTests : IDisposable
     }
 
     [Fact]
+    public void Gpu_backend_upscales_exactly_when_there_is_a_gpu()
+    {
+        // DirectML on Windows, Core ML on macOS, CUDA in the Linux CUDA build; skipped where the machine has no GPU.
+        if (!Engine.HasGpu || Gpu.Adapters().Count == 0) return;
+        var device = $"gpu:{Gpu.Adapters()[0].Index}";
+        var path = TestModels.Write(dir, "nn2", TestModels.NearestResize(2));
+        var model = engine.Load(path, device);
+        Assert.EndsWith($"({Engine.GpuBackend})", model.Device);
+
+        var src = TestImages.Pattern(45, 29);
+        var result = engine.Upscale(src, path, device, 2, 32, null, null, default);
+        Assert.Equal(TestImages.Nearest(src, 2).Pixels, result.Pixels);
+    }
+
+    [Fact]
+    public void Missing_cuda_libraries_are_explained()
+    {
+        // As ONNX Runtime's CUDA build reports it when cuBLAS isn't installed.
+        var raw = new Exception("[ErrorCode:Fail] provider_bridge_ort.cc:1952 [ONNXRuntimeError] : 1 : FAIL : Failed to load library /root/.net/z/x/libonnxruntime_providers_cuda.so with error: libcublasLt.so.12: cannot open shared object file: No such file or directory");
+        Assert.StartsWith("CUDA 12 and cuDNN 9 are needed, but libcublasLt.so.12 wasn't found.", Engine.GpuError(raw));
+        Assert.Equal("Something else", Engine.GpuError(new Exception("Something else")));
+    }
+
+    [Fact]
     public void Fixed_size_model_is_detected_and_tiled()
     {
         var path = TestModels.Write(dir, "nn4-fixed", TestModels.NearestResize(4, fixedSize: 48));

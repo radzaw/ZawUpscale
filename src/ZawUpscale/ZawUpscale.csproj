@@ -21,20 +21,38 @@
     <OutputType Condition="'$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.StartsWith('win'))">WinExe</OutputType>
   </PropertyGroup>
 
-  <!-- Windows gets the DirectML build of ONNX Runtime (any DirectX 12 GPU: NVIDIA, AMD, Intel); other platforms the CPU build. -->
+  <!--
+    The GPU backend, by platform. Windows: the DirectML build of ONNX Runtime (any DirectX 12 GPU: NVIDIA, AMD, Intel).
+    macOS: Core ML (GPU and Neural Engine), which the standard build includes. Linux: the CPU build, or with
+    -p:ZawCuda=true the CUDA build for NVIDIA GPUs (linux-x64 only; much larger, and it needs CUDA 12 and cuDNN 9).
+  -->
   <PropertyGroup>
     <ZawTargetsWindows Condition="'$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.StartsWith('win'))">true</ZawTargetsWindows>
     <ZawTargetsWindows Condition="'$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">true</ZawTargetsWindows>
-    <DefineConstants Condition="'$(ZawTargetsWindows)' == 'true'">$(DefineConstants);DIRECTML</DefineConstants>
+    <ZawTargetsMac Condition="'$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.StartsWith('osx'))">true</ZawTargetsMac>
+    <ZawTargetsMac Condition="'$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('OSX'))">true</ZawTargetsMac>
+    <ZawGpu>none</ZawGpu>
+    <ZawGpu Condition="'$(ZawTargetsWindows)' == 'true'">directml</ZawGpu>
+    <ZawGpu Condition="'$(ZawTargetsMac)' == 'true'">coreml</ZawGpu>
+    <ZawGpu Condition="'$(ZawCuda)' == 'true'">cuda</ZawGpu>
+    <DefineConstants Condition="'$(ZawGpu)' == 'directml'">$(DefineConstants);DIRECTML</DefineConstants>
+    <DefineConstants Condition="'$(ZawGpu)' == 'coreml'">$(DefineConstants);COREML</DefineConstants>
+    <DefineConstants Condition="'$(ZawGpu)' == 'cuda'">$(DefineConstants);CUDA</DefineConstants>
   </PropertyGroup>
+
+  <Target Name="ZawCheckCuda" BeforeTargets="Restore;Build" Condition="'$(ZawCuda)' == 'true'">
+    <Error Condition="'$(RuntimeIdentifier)' != 'linux-x64' and !('$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('Linux')))"
+      Text="The CUDA build (ZawCuda=true) is for linux-x64 only; Windows uses DirectML for every GPU." />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.12" />
     <PackageReference Include="Photino.NET" Version="4.0.16" />
     <PackageReference Include="SkiaSharp" Version="4.153.1" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.153.1" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" Condition="'$(ZawTargetsWindows)' == 'true'" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" Condition="'$(ZawTargetsWindows)' != 'true'" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" Condition="'$(ZawGpu)' == 'directml'" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.24.4" Condition="'$(ZawGpu)' == 'cuda'" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" Condition="'$(ZawGpu)' == 'none' or '$(ZawGpu)' == 'coreml'" />
   </ItemGroup>
 
   <!-- The UI is embedded into the assembly so a single-file publish is fully self-contained. -->

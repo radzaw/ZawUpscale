@@ -63,6 +63,7 @@ public static class Api
         {
             devices = Engine.Devices(),
             gpuSupport = Engine.HasGpu,
+            gpuBackend = Engine.GpuBackend,
             activeDevice = engine.ActiveDevice,
             gpuError = engine.LastGpuError,
             defaultOutputDir = Jobs.DefaultOutputDir(),

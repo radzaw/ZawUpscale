@@ -20,7 +20,10 @@ The backend is an ASP.NET Core app that runs the AI models with [ONNX Runtime](h
   - **Your own models**: any ESRGAN-style super-resolution network exported to ONNX (an RGB input `[1, 3, H, W]` in 0–1, float32 or float16). It can take any size or a fixed tile size, and its scale (1×, 2×, 4×…) is detected automatically.
 - **Face restoration** (optional): after upscaling, faces are found ([YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet)), cut out aligned, rebuilt by a face model and blended back over the result, with a strength setting. It brings back eyes, teeth and skin in small or blurry faces that upscalers smear. Choose **GFPGAN 1.4** (325 MB, Apache-2.0) or **CodeFormer** (360 MB, non-commercial only, keeps closer to the person's likeness); the detector (230 KB) comes with either. Results go in a `…_x4_faces` folder. It's off for SUPIR, which rebuilds faces itself.
 - **Any scale from 1× to 32×**: a 4× model runs several times for 8× or 16×. For in-between scales (2×, 3×, 6×) the result is resized with a high-quality filter, and the image is shrunk *before* the last pass instead of overshooting (6× takes one 4× pass, a reduction to 1.5×, then a 4× pass, not 16× followed by throwing most of it away).
-- **GPU acceleration** on Windows through DirectML (any DirectX 12 graphics card: NVIDIA, AMD or Intel), with a choice of GPU. The CPU is used on Linux and macOS, or when you choose it.
+- **GPU acceleration**, with a choice of GPU, and the CPU when there's none or you choose it:
+  - **Windows**: DirectML, for any DirectX 12 graphics card (NVIDIA, AMD or Intel).
+  - **macOS**: Core ML, on the GPU and Neural Engine of Apple silicon. SUPIR doesn't run on Core ML.
+  - **Linux**: CUDA for NVIDIA GPUs, in the separate `linux-x64-cuda` build. It's much larger (about 260 MB) and needs the NVIDIA driver, CUDA 12 and cuDNN 9 (in Docker, NVIDIA's `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` image has them; run it with `--gpus all`). Without them it says which library is missing and uses the CPU. On GeForce RTX 50 cards the very first run takes about a minute longer while the driver compiles the GPU code; it's cached after that (in `~/.nv`, so in Docker mount that to keep it). The plain `linux-x64` and `linux-arm64` builds use the CPU.
 - **Images of any size**: they're processed in overlapping tiles (16 px of context on each side, of which only the centre is kept), so there are no seams. If the GPU runs out of memory, the tile size is halved and the image started again automatically.
 - **Transparency** is kept: the alpha channel is resized alongside the result. **EXIF orientation** is applied, so phone photos come out the right way up.
 - **Compare**: a before/after slider, side by side, or either image alone, with zoom (mouse wheel, 1:1, fit) and pan. When zoomed in to 200% or more, pixels are shown sharply.
@@ -107,7 +110,7 @@ Options (`ZawUpscale --help`): `--port <n>`, `--no-browser` (print the URL inste
 ./publish.sh linux-x64 osx-arm64
 ```
 
-The result is a single self-contained file per platform (`ZawUpscale.exe` / `ZawUpscale`), with ONNX Runtime and Skia inside. Windows builds use the DirectML build of ONNX Runtime, the others the CPU build. There is no Intel Mac build, because ONNX Runtime no longer ships one. Pushing a `vX.Y.Z` tag makes CI build all platforms and publish a GitHub release with `SHA256SUMS`.
+The result is a single self-contained file per platform (`ZawUpscale.exe` / `ZawUpscale`), with ONNX Runtime and Skia inside. Windows builds use the DirectML build of ONNX Runtime, macOS the standard build with Core ML, and Linux the CPU build; `./publish.sh linux-x64-cuda` (or `-p:ZawCuda=true` on any `dotnet` command, on Linux) makes the CUDA build instead. There is no Intel Mac build, because ONNX Runtime no longer ships one. Pushing a `vX.Y.Z` tag makes CI build all platforms and publish a GitHub release with `SHA256SUMS`.
 
 ### App icon
 

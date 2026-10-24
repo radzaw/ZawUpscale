@@ -24,6 +24,7 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
     public int Scale { get; }
     public (int Width, int Height)? FixedSize { get; }
     public string Device { get; }
+    public bool UniformTiles { get; init; }
 
     public OnnxSrModel(string path, SessionOptions options, string device)
     {
@@ -135,7 +136,8 @@ public sealed record DeviceInfo(string Id, string Name, string? Detail);
 /// <summary>
 /// Owns the loaded network (one at a time: they can be large and live in GPU memory) and runs upscales.
 /// Face restoration models are kept in a second slot beside it, so a batch doesn't reload either per image.
-/// Device ids: "auto" (first GPU, falling back to the CPU), "gpu:N" (DirectML adapter N) and "cpu".
+/// Device ids: "auto" (first GPU, falling back to the CPU), "gpu:N" (GPU N of the build's backend, see
+/// <see cref="Gpu"/>) and "cpu".
 /// </summary>
 public sealed class Engine(ILogger<Engine> log) : IDisposable
 {
@@ -146,11 +148,17 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
     string? facesKey;
     string? lastGpuError;
 
+    /// <summary>How this build reaches the GPU: "DirectML" (Windows), "CUDA" (the Linux CUDA build), "CoreML" (macOS), or null.</summary>
 #if DIRECTML
-    public const bool HasGpu = true;
+    public const string? GpuBackend = "DirectML";
+#elif CUDA
+    public const string? GpuBackend = "CUDA";
+#elif COREML
+    public const string? GpuBackend = "CoreML";
 #else
-    public const bool HasGpu = false;
+    public const string? GpuBackend = null;
 #endif
+    public const bool HasGpu = GpuBackend != null;
 
     public static List<DeviceInfo> Devices()
     {
@@ -226,49 +234,68 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
     OnnxSrModel Create(string path, string device)
     {
         if (!File.Exists(path)) throw new ApiException($"Model file not found: {path}");
-        return OnDevice(device, (so, name) => new OnnxSrModel(path, so, name));
+        // Core ML compiles the network for each input shape it sees, so every tile of a pass is given the same one.
+        return OnDevice(device, (so, name) => new OnnxSrModel(path, so, name) { UniformTiles = GpuBackend == "CoreML" && name != "CPU" });
     }
 
     /// <summary>Creates a model on the chosen GPU, or the CPU; "auto" falls back to the CPU when the GPU fails.</summary>
     T OnDevice<T>(string device, Func<SessionOptions, string, T> create)
     {
-        if (device != "cpu" && HasGpu)
+        var gpus = HasGpu ? Gpu.Adapters() : [];
+        // "auto" with no GPU found goes straight to the CPU; an explicit GPU is tried anyway, to report why it fails.
+        if (device != "cpu" && HasGpu && (gpus.Count > 0 || device != "auto"))
         {
-            var gpus = Gpu.Adapters();
             var index = device.StartsWith("gpu:") && int.TryParse(device[4..], out var n) ? n : gpus.FirstOrDefault()?.Index ?? 0;
             var name = gpus.FirstOrDefault(g => g.Index == index)?.Name ?? $"GPU {index}";
             try
             {
                 var so = GpuOptions(index);
-                var m = create(so, $"{name} (DirectML)");
+                var m = create(so, $"{name} ({GpuBackend})");
                 lastGpuError = null;
                 return m;
             }
             catch (Exception ex) when (ex is OnnxRuntimeException or EntryPointNotFoundException or DllNotFoundException)
             {
-                lastGpuError = ex.Message;
+                lastGpuError = GpuError(ex);
                 log.LogWarning("GPU {Device} unavailable, using the CPU: {Message}", name, ex.Message);
-                if (device != "auto") throw new ApiException($"Could not use {name}: {ex.Message}");
+                if (device != "auto") throw new ApiException($"Could not use {name}: {lastGpuError}");
             }
         }
         var cpu = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
         return create(cpu, "CPU");
     }
 
+    /// <summary>Why the GPU couldn't be used, in words a user can act on where possible.</summary>
+    internal static string GpuError(Exception ex)
+    {
+        // The CUDA build loads the CUDA and cuDNN libraries of the system; ONNX Runtime reports the first one missing.
+        var missing = System.Text.RegularExpressions.Regex.Match(ex.Message, @"(lib[\w.+-]+\.so[.\d]*): cannot open shared object file");
+        return missing.Success
+            ? $"CUDA 12 and cuDNN 9 are needed, but {missing.Groups[1].Value} wasn't found. Install them (NVIDIA's CUDA 12 runtime and cuDNN 9 packages), or use the CPU."
+            : ex.Message;
+    }
+
     SupirModel CreateSupir(string dir, string device)
     {
-        var package = SupirPackage.Open(dir);
-        var gpus = HasGpu ? Gpu.Adapters() : [];
         // On the CPU a 50-step SDXL run takes hours, and float16 networks lack CPU kernels.
+#if COREML
+        throw new ApiException("SUPIR needs a DirectML (Windows) or CUDA (Linux) GPU; it doesn't run on Core ML.");
+#elif !(DIRECTML || CUDA)
+        throw new ApiException("SUPIR needs a GPU, which this build can't use. Use the Windows build (DirectML), or the linux-x64-cuda build with an NVIDIA GPU.");
+#else
+        var package = SupirPackage.Open(dir);
+        var gpus = Gpu.Adapters();
         if (device == "cpu" || gpus.Count == 0)
-            throw new ApiException(HasGpu ? "SUPIR needs a GPU. Choose one as the device (in Preferences, or --device on the command line)." : "SUPIR needs a GPU, which this build can only use on Windows (DirectML).");
+            throw new ApiException("SUPIR needs a GPU. Choose one as the device (in Preferences, or --device on the command line).");
         var index = device.StartsWith("gpu:") && int.TryParse(device[4..], out var n) ? n : gpus[0].Index;
         var name = gpus.FirstOrDefault(g => g.Index == index)?.Name ?? $"GPU {index}";
-        return new SupirModel(package, () => GpuOptions(index), $"{name} (DirectML)");
+        return new SupirModel(package, () => GpuOptions(index), $"{name} ({GpuBackend})");
+#endif
     }
 
     static SessionOptions GpuOptions(int deviceId)
     {
+#if DIRECTML
         // DirectML doesn't support memory patterns or parallel execution.
         var so = new SessionOptions
         {
@@ -276,8 +303,26 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             EnableMemoryPattern = false,
             ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
         };
-#if DIRECTML
         so.AppendExecutionProvider_DML(deviceId);
+#else
+        var so = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
+#endif
+#if CUDA
+        try
+        {
+            // cuDNN's default exhaustive search benchmarks every new input shape, which makes the first tiles crawl.
+            using var cuda = new OrtCUDAProviderOptions();
+            cuda.UpdateOptions(new Dictionary<string, string> { ["device_id"] = deviceId.ToString(), ["cudnn_conv_algo_search"] = "HEURISTIC" });
+            so.AppendExecutionProvider_CUDA(cuda);
+        }
+        catch
+        {
+            so.Dispose();
+            throw;
+        }
+#elif COREML
+        // ML Program: the newer Core ML format, with more operators and float16; it runs on the GPU and the Neural Engine.
+        so.AppendExecutionProvider_CoreML(CoreMLFlags.COREML_FLAG_CREATE_MLPROGRAM);
 #endif
         return so;
     }

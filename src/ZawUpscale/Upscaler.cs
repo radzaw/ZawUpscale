@@ -8,6 +8,8 @@ public interface ISrModel
     (int Width, int Height)? FixedSize { get; }
     /// <summary>Runs the network on one tile: <paramref name="chw"/> holds 3 × h × w floats; the result 3 × h·Scale × w·Scale.</summary>
     float[] Run(float[] chw, int h, int w);
+    /// <summary>True if every tile of a pass should have the same input size (edge tiles padded), for backends that compile per shape.</summary>
+    bool UniformTiles => false;
 }
 
 /// <summary>Thrown when a tile doesn't fit in (GPU) memory, so the caller can retry with smaller tiles.</summary>
@@ -96,6 +98,10 @@ public sealed class Upscaler(ISrModel model)
         var sp = src.Pixels;
         var dp = dst.Pixels;
         var dstStride = dst.Width * 4;
+        // With uniform tiles, every input is as large as the largest region (an inner tile with context on both sides).
+        var uniform = model.FixedSize == null && model.UniformTiles
+            ? (W: RoundUp(Math.Min(W, tile + 2 * Pad), Multiple), H: RoundUp(Math.Min(H, tile + 2 * Pad), Multiple))
+            : ((int W, int H)?)null;
 
         for (var y0 = 0; y0 < H; y0 += tile)
             for (var x0 = 0; x0 < W; x0 += tile)
@@ -109,6 +115,7 @@ public sealed class Upscaler(ISrModel model)
                 // Network input size: the region, grown to the fixed size or the next multiple; the extra is filled by repeating the edge.
                 int iw, ih;
                 if (model.FixedSize is { } f) (iw, ih) = (f.Width, f.Height);
+                else if (uniform is { } u) (iw, ih) = (u.W, u.H);
                 else (iw, ih) = (RoundUp(rw, Multiple), RoundUp(rh, Multiple));
 
                 var input = new float[3 * iw * ih];

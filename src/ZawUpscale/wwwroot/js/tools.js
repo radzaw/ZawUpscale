@@ -82,6 +82,12 @@ export function modelsDialog(app) {
 
 // ---------------------------------------------------------------- preferences
 
+const GPU_NOTES = {
+  DirectML: 'GPUs are used through DirectML (any DirectX 12 graphics card).',
+  CUDA: 'NVIDIA GPUs are used through CUDA; it needs the NVIDIA driver, CUDA 12 and cuDNN 9.',
+  CoreML: 'The GPU and Neural Engine are used through Core ML.',
+};
+
 export async function preferencesDialog(app) {
   const p = app.prefs;
   const s = app.settings;
@@ -99,7 +105,8 @@ export async function preferencesDialog(app) {
       h('label', { class: 'frow' }, h('span', null, 'Device'), device),
       h('label', { class: 'frow' }, h('span', null, 'Tile size'), tile),
       h('div', { class: 'hint' }, 'Images are processed in tiles. Larger tiles are a little faster but need more memory; if the GPU runs out, the tile size is halved automatically. SUPIR has its own tiles (1024 px, smaller if memory runs out). ' +
-        (app.system.gpuSupport ? 'GPUs are used through DirectML (any DirectX 12 graphics card).' : 'This build runs on the CPU.'))),
+        (GPU_NOTES[app.system.gpuBackend] || 'This build runs on the CPU. For an NVIDIA GPU on Linux, use the linux-x64-cuda build.')),
+      app.system.gpuError ? h('div', { class: 'hint', style: { color: 'var(--err)' } }, 'The GPU could not be used: ' + app.system.gpuError) : null),
     buttons: [{ label: 'OK', primary: true, value: true }, { label: 'Cancel', value: false }],
   });
   if (!r) return;

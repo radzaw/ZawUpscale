@@ -54,6 +54,7 @@ jobs:
         include:
           - { rid: win-x64, os: windows-latest }
           - { rid: linux-x64, os: ubuntu-latest }
+          - { rid: linux-x64-cuda, os: ubuntu-latest }
           - { rid: linux-arm64, os: ubuntu-latest }
           - { rid: osx-arm64, os: ubuntu-latest }
     steps:
