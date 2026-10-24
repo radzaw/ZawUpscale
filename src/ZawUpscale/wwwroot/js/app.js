@@ -12,11 +12,21 @@ const DEFAULT_SETTINGS = {
   model: 'realesr-general-x4v3', scale: 4, format: 'auto', quality: 92, outputDir: '', nameTemplate: '{name}',
   existing: 'skip', tile: 0, device: 'auto', supir: {},
   faces: '', faceModel: 'gfpgan-v1.4', faceStrength: 0.8, // faces: the face model in use, or '' (off); faceModel: the last one chosen
+  size: 'scale', width: 3840, height: 2160, longEdge: 4000, // size: 'scale', or a target size: 'width', 'height', 'fit' or 'long'
+  detail: 1, sharpen: 0, keepColors: false, half: false,
 };
 // Running in the native window (Photino injects window.external.sendMessage) rather than a browser.
 const NATIVE = typeof window.external?.sendMessage === 'function';
+const native = msg => { if (NATIVE) window.external.sendMessage(msg); };
 const SCALES = [2, 3, 4, 8];
-const FORMATS = [['auto', 'Same'], ['png', 'PNG'], ['jpg', 'JPEG'], ['webp', 'WebP']];
+const FORMATS = [['auto', 'Same as the original'], ['png', 'PNG'], ['jpg', 'JPEG'], ['webp', 'WebP'], ['avif', 'AVIF'], ['tif', 'TIFF'], ['jxl', 'JPEG XL']];
+const SIZE_MODES = [['width', 'Width'], ['height', 'Height'], ['fit', 'Fit inside'], ['long', 'Long edge']];
+// Target sizes: screens, and prints at 300 dpi (portrait; the box turns to match each image).
+const SIZE_PRESETS = [
+  ['Full HD screen', 1920, 1080], ['4K UHD screen', 3840, 2160], ['5K screen', 5120, 2880], ['8K screen', 7680, 4320],
+  ['Print 10 × 15 cm, 300 dpi', 1181, 1772], ['Print 13 × 18 cm, 300 dpi', 1535, 2126], ['Print 20 × 30 cm, 300 dpi', 2362, 3543],
+  ['Print A4, 300 dpi', 2480, 3508], ['Print A3, 300 dpi', 3508, 4961], ['Print US Letter, 300 dpi', 2550, 3300],
+];
 const UPLOAD_BATCH = 16;
 
 const baseName = p => p.split(/[\\/]/).filter(Boolean).pop() || p;
@@ -25,13 +35,40 @@ const fmtScale = s => String(Number(Number(s).toFixed(2)));
 const imageUrl = (path, v) => urlWithToken('/fs/image', { path, v });
 const thumbUrl = (path, size, v) => urlWithToken('/fs/thumb', { path, size, v });
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+// "About 3 minutes left", from the working time so far and the fraction done; nothing until there's enough to go on.
+function eta(activeMs, frac) {
+  if (!activeMs || frac < 0.02 || activeMs < 3000) return 'Working out the time left…';
+  const left = activeMs * (1 - frac) / frac / 1000;
+  if (left < 10) return 'Almost done';
+  if (left < 60) return `About ${Math.ceil(left / 10) * 10} seconds left`;
+  if (left < 3600) return `About ${plural(Math.round(left / 60), 'minute')} left`;
+  return `About ${(left / 3600).toFixed(1)} hours left`;
+}
 // Models that upscale (face restoration models only run after one).
 const isUpscaler = m => m.kind !== 'face';
 
+// As the server's Jobs.FormatFor (an animated GIF stays a GIF, which only the server can tell).
 function formatFor(path, format) {
   if (format !== 'auto') return format;
   const ext = (path.match(/\.([^.\\/]+)$/)?.[1] || '').toLowerCase();
-  return ['jpg', 'jpeg', 'jfif'].includes(ext) ? 'jpg' : ext === 'webp' ? 'webp' : 'png';
+  return { jpg: 'jpg', jpeg: 'jpg', jfif: 'jpg', heic: 'jpg', heif: 'jpg', webp: 'webp', avif: 'avif', tif: 'tif', tiff: 'tif', jxl: 'jxl' }[ext] || 'png';
+}
+
+// As the server's Jobs.SizeLabel / ScaleFor.
+const sizeLabel = s => ({ width: `w${s.width}`, height: `h${s.height}`, fit: `${s.width}x${s.height}`, long: `long${s.longEdge}` })[s.size] || `x${fmtScale(s.scale)}`;
+const scaleToken = s => (s.size && s.size !== 'scale' ? sizeLabel(s) : fmtScale(s.scale));
+function scaleFor(s, w, h) {
+  switch (s.size) {
+    case 'width': return s.width / w;
+    case 'height': return s.height / h;
+    case 'long': return s.longEdge / Math.max(w, h);
+    case 'fit': {
+      const [bw, bh] = (w >= h) === (s.width >= s.height) ? [s.width, s.height] : [s.height, s.width];
+      return Math.min(bw / w, bh / h);
+    }
+    default: return Number(s.scale);
+  }
 }
 
 class App {
@@ -220,9 +257,10 @@ class App {
     this.secSource = h('div');
     this.secModel = h('div');
     this.secScale = h('div');
+    this.secLook = h('div');
     this.secOutput = h('div');
     this.foot = h('div', { class: 'panel-foot' });
-    panel.append(h('div', { class: 'panel-scroll' }, this.secSource, this.secModel, this.secScale, this.secOutput), this.foot);
+    panel.append(h('div', { class: 'panel-scroll' }, this.secSource, this.secModel, this.secScale, this.secLook, this.secOutput), this.foot);
     this.buildOutput();
   }
 
@@ -230,6 +268,7 @@ class App {
     this.renderSource();
     this.renderModels();
     this.renderScale();
+    this.renderLook();
     this.renderOutputExtras();
     this.renderFoot();
     this.renderStage();
@@ -283,14 +322,21 @@ class App {
       const f = d.total ? d.received / d.total : 0;
       return h('div', { class: 'mdl' }, h('div', { class: 'bar' }, h('i', { style: { width: f * 100 + '%' } })), h('span', { class: 'muted num', style: { fontSize: '12px' } }, `${Math.round(f * 100)}%`));
     }
+    const half = this.wantsHalf(m);
     return h('div', { class: 'mdl' },
-      h('button', { class: 'btn small', html: icon('download') + `<span>Download · ${fmtBytes(m.size)}</span>`, onclick: e => { e.stopPropagation(); e.preventDefault(); this.downloadModel(m.id); } }),
+      h('button', { class: 'btn small', html: icon('download') + `<span>Download · ${fmtBytes(half ? m.halfSize : m.size)}${half ? ' (float16)' : ''}</span>`, onclick: e => { e.stopPropagation(); e.preventDefault(); this.downloadModel(m.id, half); } }),
       d?.error ? h('span', { class: 'err', title: d.error }, 'Failed') : null);
+  }
+
+  // Whether to fetch a model's float16 version: chosen in Preferences, the model has one, and the device isn't the CPU.
+  wantsHalf(m) {
+    return !!(this.settings.half && m.halfSize && this.settings.device !== 'cpu' && this.system.gpuSupport);
   }
 
   renderModels() {
     const list = this.models;
-    const cards = list.filter(m => isUpscaler(m) && (m.builtIn || m.installed)).map(m => {
+    // The main models always; the rest of the catalog once downloaded (all of them are in Models…).
+    const cards = list.filter(m => isUpscaler(m) && (m.featured || m.installed)).map(m => {
       const on = m.installed && this.settings.model === m.id;
       const extra = m.installed ? null : this.modelDownload(m);
       const card = h('label', { class: 'mcard' + (on ? ' on' : '') + (m.installed ? '' : ' missing') },
@@ -387,26 +433,85 @@ class App {
 
   renderScale() {
     const s = this.settings;
-    const custom = h('input', { class: 'inp custom-scale', type: 'number', min: 1, max: 32, step: 0.5, value: SCALES.includes(Number(s.scale)) ? '' : s.scale, placeholder: 'Other', title: 'Any scale from 1 to 32' });
-    custom.addEventListener('change', () => {
-      const v = Number(custom.value);
-      if (v >= 1 && v <= 32) { s.scale = v; this.settingsChanged(); }
-    });
-    const seg = h('div', { class: 'seg grow' }, SCALES.map(n => h('button', { class: Number(s.scale) === n ? 'on' : '', disabled: this.running(), onclick: () => { s.scale = n; this.settingsChanged(); } }, n + '×')));
+    const disabled = this.running();
+    const bySize = s.size && s.size !== 'scale';
+    const modeSeg = h('div', { class: 'seg compact' },
+      h('button', { class: bySize ? '' : 'on', disabled, onclick: () => { s.size = 'scale'; this.settingsChanged(); } }, 'Scale'),
+      h('button', { class: bySize ? 'on' : '', disabled, title: 'A width, height, box or long edge in pixels', onclick: () => { if (!bySize) { s.size = 'fit'; this.settingsChanged(); } } }, 'Size'));
+    let controls;
+    if (!bySize) {
+      const custom = h('input', { class: 'inp custom-scale', type: 'number', min: 1, max: 32, step: 0.5, value: SCALES.includes(Number(s.scale)) ? '' : s.scale, placeholder: 'Other', title: 'Any scale from 1 to 32', disabled });
+      custom.addEventListener('change', () => {
+        const v = Number(custom.value);
+        if (v >= 1 && v <= 32) { s.scale = v; this.settingsChanged(); }
+      });
+      const seg = h('div', { class: 'seg grow' }, SCALES.map(n => h('button', { class: Number(s.scale) === n ? 'on' : '', disabled, onclick: () => { s.scale = n; this.settingsChanged(); } }, n + '×')));
+      controls = h('div', { class: 'row' }, seg, custom);
+    } else {
+      const px = (key, title) => {
+        const i = h('input', { class: 'inp px', type: 'number', min: 1, max: 65535, step: 1, value: s[key], title, disabled });
+        i.addEventListener('change', () => {
+          const v = Math.round(Number(i.value));
+          if (v >= 1 && v <= 65535) { s[key] = v; this.settingsChanged(); } else i.value = s[key];
+        });
+        return i;
+      };
+      const mode = h('select', { class: 'inp', disabled }, SIZE_MODES.map(([v, l]) => h('option', { value: v, selected: s.size === v }, l)));
+      mode.addEventListener('change', () => { s.size = mode.value; this.settingsChanged(); });
+      const inputs = s.size === 'fit' ? [px('width', 'Width'), h('span', { class: 'muted' }, '×'), px('height', 'Height')]
+        : s.size === 'width' ? [px('width', 'Width')] : s.size === 'height' ? [px('height', 'Height')] : [px('longEdge', 'Long edge')];
+      const preset = h('select', { class: 'inp', disabled, title: 'Common screen and print sizes' },
+        h('option', { value: '' }, 'Presets…'), SIZE_PRESETS.map(([l, w, hh], i) => h('option', { value: i }, `${l} (${w} × ${hh})`)));
+      preset.addEventListener('change', () => {
+        const p = SIZE_PRESETS[preset.value];
+        if (p) { s.size = 'fit'; s.width = p[1]; s.height = p[2]; this.settingsChanged(); }
+      });
+      controls = h('div', { class: 'size-box' }, h('div', { class: 'row' }, mode, ...inputs, h('span', { class: 'muted' }, 'px')), preset);
+    }
     let info;
     const src = this.source;
     if (src?.kind === 'image' && src.width) {
-      const w = Math.round(src.width * s.scale), hh = Math.round(src.height * s.scale);
-      info = h('div', { class: 'result-size' }, `${src.width} × ${src.height} → `, h('b', null, `${w} × ${hh}`), ` (${((w * hh) / 1e6).toFixed(1)} MP)`);
+      const k = scaleFor(s, src.width, src.height);
+      const w = Math.max(1, Math.round(src.width * k)), hh = Math.max(1, Math.round(src.height * k));
+      info = h('div', { class: 'result-size' + (k > 32 ? ' err' : '') }, `${src.width} × ${src.height} → `, h('b', null, `${w} × ${hh}`),
+        k > 32 ? ' — more than 32×, too large' : ` (${((w * hh) / 1e6).toFixed(1)} MP${bySize ? `, ${fmtScale(k)}×` : ''})`);
     } else {
-      info = h('div', { class: 'result-size' }, `Each image ${fmtScale(s.scale)}× wider and taller.`);
+      info = h('div', { class: 'result-size' }, {
+        width: `Each image ${s.width} pixels wide.`, height: `Each image ${s.height} pixels high.`,
+        fit: `Each image as large as fits inside ${s.width} × ${s.height}, the box turned to match portrait or landscape images.`,
+        long: `Each image ${s.longEdge} pixels on its long edge.`,
+      }[s.size] || `Each image ${fmtScale(s.scale)}× wider and taller.`);
     }
-    this.secScale.replaceChildren(this.title(3, 'Scale'), h('div', { class: 'row' }, seg, custom), info);
+    this.secScale.replaceChildren(this.title(3, 'Size', modeSeg), controls, info);
+  }
+
+  // How the result looks: AI detail against a plain enlargement, sharpness, the original's colors. Sliders save without re-rendering.
+  renderLook() {
+    const s = this.settings;
+    const disabled = this.running();
+    const slider = (key, min, max, step, fmt, title) => {
+      const val = h('span', { class: 'val' }, fmt(s[key]));
+      const range = h('input', { type: 'range', min, max, step, value: s[key], disabled });
+      range.addEventListener('input', () => { s[key] = Number(range.value); val.textContent = fmt(s[key]); this.saveStateSoon(); });
+      range.addEventListener('dblclick', () => { s[key] = DEFAULT_SETTINGS[key]; range.value = s[key]; val.textContent = fmt(s[key]); this.saveStateSoon(); });
+      return h('div', { class: 'quality', title: title + ' Double-click to reset.' }, range, val);
+    };
+    const pct = v => Math.round(v * 100) + '%';
+    const sharp = v => (v === 0 ? 'Off' : v > 0 ? `+${Math.round(v * 100)}` : `−${Math.round(-v * 100)}`);
+    const keep = h('input', { type: 'checkbox', checked: !!s.keepColors, disabled, onchange: e => { s.keepColors = e.target.checked; this.saveStateSoon(); } });
+    this.secLook.replaceChildren(this.title(4, 'Look'),
+      h('div', { class: 'field' }, h('label', null, 'AI detail'),
+        slider('detail', 0, 1, 0.05, pct, 'How much of the AI\'s detail to keep. Lower blends in a plain enlargement of the original, for a more natural look.')),
+      h('div', { class: 'field' }, h('label', null, 'Sharpness'),
+        slider('sharpen', -1, 1, 0.05, sharp, 'Sharpen the result, or soften it (below zero).')),
+      h('label', { class: 'chk', title: 'Gives the result the colors and tones of the original, removing any color shift' }, keep, 'Keep the original colors'));
   }
 
   buildOutput() {
     const s = this.settings;
-    this.fmtSeg = h('div', { class: 'seg' });
+    this.fmtSel = h('select', { class: 'inp', title: 'Same as the original keeps each image\'s format (HEIC becomes JPEG; BMP, ICO and still GIFs become PNG)' },
+      FORMATS.map(([v, l]) => h('option', { value: v, selected: s.format === v }, l)));
+    this.fmtSel.addEventListener('change', () => { s.format = this.fmtSel.value; this.settingsChanged(); });
     this.qualityRow = h('div', { class: 'field' });
     this.outDir = h('input', { class: 'inp', spellcheck: false, value: s.outputDir || '' });
     this.outDir.addEventListener('input', () => { s.outputDir = this.outDir.value.trim(); this.saveStateSoon(); this.renderOutputExtras(); });
@@ -422,8 +527,8 @@ class App {
       .map(([v, l]) => h('option', { value: v, selected: s.existing === v }, l)));
     existing.addEventListener('change', () => { s.existing = existing.value; this.saveStateSoon(); });
     this.secOutput.append(
-      this.title(4, 'Save as'),
-      this.fmtSeg,
+      this.title(5, 'Save as'),
+      h('div', { class: 'field' }, h('label', null, 'Format'), this.fmtSel),
       this.qualityRow,
       h('div', { class: 'field' }, h('label', null, 'Folder'), h('div', { class: 'with-btn' }, this.outDir, pickDir), this.outHint),
       h('div', { class: 'field' }, h('label', null, 'File name'), this.name, this.namePreview),
@@ -432,25 +537,27 @@ class App {
 
   renderOutputExtras() {
     const s = this.settings;
-    this.fmtSeg.replaceChildren(...FORMATS.map(([v, l]) => h('button', { class: s.format === v ? 'on' : '', title: v === 'auto' ? 'The same format as each original (PNG for BMP, GIF and ICO)' : '', onclick: () => { s.format = v; this.settingsChanged(); } }, l)));
-    if (s.format === 'png') this.qualityRow.replaceChildren();
+    this.fmtSel.value = s.format;
+    // PNG and TIFF are always lossless; WebP and JPEG XL become lossless at 100.
+    if (s.format === 'png' || s.format === 'tif') this.qualityRow.replaceChildren();
     else {
-      const val = h('span', { class: 'val' }, s.quality >= 100 && s.format === 'webp' ? 'Lossless' : s.quality);
+      const label = () => (s.quality >= 100 && ['webp', 'jxl'].includes(s.format) ? 'Lossless' : s.quality);
+      const val = h('span', { class: 'val' }, label());
       const range = h('input', { type: 'range', min: 50, max: 100, value: s.quality });
-      range.addEventListener('input', () => { s.quality = Number(range.value); val.textContent = s.quality >= 100 && s.format === 'webp' ? 'Lossless' : s.quality; this.saveStateSoon(); });
-      this.qualityRow.replaceChildren(h('label', null, s.format === 'auto' ? 'Quality (for JPEG and WebP)' : 'Quality'), h('div', { class: 'quality' }, range, val));
+      range.addEventListener('input', () => { s.quality = Number(range.value); val.textContent = label(); this.saveStateSoon(); });
+      this.qualityRow.replaceChildren(h('label', null, s.format === 'auto' ? 'Quality (for JPEG, WebP, AVIF and JPEG XL)' : 'Quality'), h('div', { class: 'quality' }, range, val));
     }
     const sample = this.source?.kind === 'image' ? this.source.path : this.source?.items?.[0]?.path;
     if (sample) {
       const base = baseName(sample).replace(/\.[^.]+$/, '');
       const tpl = s.nameTemplate?.trim() || '{name}';
-      const name = tpl.replace(/\{name\}/gi, base).replace(/\{scale\}/gi, fmtScale(s.scale)).replace(/\{model\}/gi, s.model) + '.' + formatFor(sample, s.format);
+      const name = tpl.replace(/\{name\}/gi, base).replace(/\{scale\}/gi, scaleToken(s)).replace(/\{model\}/gi, s.model) + '.' + formatFor(sample, s.format);
       this.namePreview.replaceChildren('e.g. ', h('b', null, name));
     } else {
       this.namePreview.replaceChildren('{name}, {scale} and {model} are filled in.');
     }
     const inbox = this.source?.uploaded;
-    const sub = `${s.model}_x${fmtScale(s.scale)}${this.facesOn() ? '_faces' : ''}`;
+    const sub = `${s.model}_${sizeLabel(s)}${this.facesOn() ? '_faces' : ''}`;
     this.outDir.placeholder = `Subfolder ${sub}`;
     this.outHint.textContent = s.outputDir ? '' : inbox ? `Dropped images are saved in ${this.system.defaultOutputDir}` : `Saved in a ${sub} folder inside the opened folder`;
     this.outHint.style.display = this.outHint.textContent ? '' : 'none';
@@ -465,13 +572,19 @@ class App {
       const cur = items.find(i => i.status === 'running');
       const frac = (doneCount + (cur?.progress ?? 0)) / items.length;
       const what = cur ? baseName(cur.input) : job.status === 'queued' ? 'Waiting…' : 'Starting…';
-      this.foot.replaceChildren(h('div', { class: 'run' },
-        h('div', { class: 'run-top' }, h('span', { class: 'spin', style: { width: '14px', height: '14px' } }),
-          h('span', { class: 'what' }, items.length > 1 ? `${what} · ${Math.min(doneCount + 1, items.length)} of ${items.length}` : `Upscaling ${what}`),
+      native(job.paused ? 'progress:paused' : `progress:${frac.toFixed(3)}`);
+      const pause = job.paused
+        ? h('button', { class: 'btn', title: 'Go on where it stopped', onclick: () => this.pause(false), html: icon('play') + '<span>Resume</span>' })
+        : h('button', { class: 'btn', title: 'Stop at the next tile; nothing is lost', onclick: () => this.pause(true), html: icon('pause') + '<span>Pause</span>' });
+      this.foot.replaceChildren(h('div', { class: 'run' + (job.paused ? ' paused' : '') },
+        h('div', { class: 'run-top' }, job.paused ? h('span', { class: 'paused-dot', html: icon('pause') }) : h('span', { class: 'spin', style: { width: '14px', height: '14px' } }),
+          h('span', { class: 'what' }, job.paused ? `Paused · ${Math.min(doneCount + 1, items.length)} of ${items.length}` : items.length > 1 ? `${what} · ${Math.min(doneCount + 1, items.length)} of ${items.length}` : `Upscaling ${what}`),
           h('span', { class: 'num muted' }, Math.floor(frac * 100) + '%')),
         h('div', { class: 'bar' }, h('i', { style: { width: frac * 100 + '%' } })),
+        h('div', { class: 'foot-note' }, job.paused ? 'Nothing is lost: resume to go on where it stopped.' : eta(job.activeMs, frac)),
         job.notice ? h('div', { class: 'foot-note warn' }, job.notice) : null,
-        h('button', { class: 'btn', onclick: () => this.cancel(), html: icon('stop') + '<span>Cancel</span> <kbd>Esc</kbd>' })));
+        h('div', { class: 'run-btns' }, pause,
+          h('button', { class: 'btn', onclick: () => this.cancel(), html: icon('stop') + '<span>Cancel</span> <kbd>Esc</kbd>' }))));
       return;
     }
     const model = this.models.find(m => m.id === this.settings.model && m.installed);
@@ -535,7 +648,7 @@ class App {
       ? h('button', { class: 'tbtn', title: 'Back to all images', onclick: () => { this.focus = null; this.renderStage(); }, html: icon('back') + '<span>All images</span>' })
       : null;
     const faces = res?.faces != null ? ` · ${res.faces ? plural(res.faces, 'face') + ' restored' : 'no faces found'}` : '';
-    const meta = res?.status === 'done' ? `${fmtMs(res.ms)}${faces} · ${baseName(res.output)}` : res?.status === 'failed' ? 'Failed' : res?.status === 'skipped' ? 'Skipped: the result already exists' : '';
+    const meta = res?.status === 'done' ? `${fmtMs(res.ms)}${res.frames ? ` · ${res.frames} frames` : ''}${faces} · ${baseName(res.output)}` : res?.status === 'failed' ? 'Failed' : res?.status === 'skipped' ? 'Skipped: the result already exists' : '';
     this.stageBar.replaceChildren(...[
       back, back ? h('span', { class: 'sep' }) : null,
       h('div', { class: 'stage-title' }, h('b', { title: path }, baseName(path)), h('span', null, meta)),
@@ -570,7 +683,7 @@ class App {
   renderEmpty() {
     this.stageBar.replaceChildren(h('div', { class: 'stage-title' }, h('b', null, 'No image'), h('span', null, 'Open or drop images to begin')));
     const anyModel = this.models.some(m => m.installed && isUpscaler(m));
-    const general = this.models.find(m => m.builtIn && !m.installed && isUpscaler(m));
+    const general = this.models.find(m => m.featured && !m.installed && isUpscaler(m));
     const dl = general?.download && !general.download.done;
     this.stageBody.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'drop-card' },
       h('div', { class: 'big', html: icon('sparkle') }),
@@ -582,7 +695,7 @@ class App {
       h('div', { class: 'kbd-hint' }, h('kbd', null, 'Ctrl'), '+', h('kbd', null, 'V'), ' pastes an image or a copied path'),
       !anyModel && general ? h('div', { class: 'first-run' },
         h('div', null, h('b', null, 'First, get a model. '), `${general.name} is ${fmtBytes(general.size)} and works well for most pictures.`),
-        dl ? h('span', { class: 'spin' }) : h('button', { class: 'btn primary small', onclick: () => this.downloadModel(general.id), html: icon('download') + '<span>Download</span>' })) : null)));
+        dl ? h('span', { class: 'spin' }) : h('button', { class: 'btn primary small', onclick: () => this.downloadModel(general.id, this.wantsHalf(general)), html: icon('download') + '<span>Download</span>' })) : null)));
   }
 
   renderBatch() {
@@ -624,7 +737,7 @@ class App {
       c.shown = r.output;
       c.img.src = thumbUrl(r.output, 320, r.finished);
       c.meta.className = 'card-meta';
-      c.meta.textContent = `${r.outWidth} × ${r.outHeight} · ${fmtMs(r.ms)}${r.faces ? ` · ${plural(r.faces, 'face')}` : ''}`;
+      c.meta.textContent = `${r.outWidth} × ${r.outHeight} · ${fmtMs(r.ms)}${r.frames ? ` · ${r.frames} frames` : ''}${r.faces ? ` · ${plural(r.faces, 'face')}` : ''}`;
     } else if (st === 'failed') {
       c.meta.className = 'card-meta err';
       c.meta.textContent = r.error || 'Failed';
@@ -727,7 +840,7 @@ class App {
   async uploadAndOpen(files) {
     const exts = this.system.inputExtensions;
     const ok = files.filter(f => exts.includes((f.name.match(/\.[^.]+$/)?.[0] || '').toLowerCase()));
-    if (!ok.length) { alertError('None of the dropped files is a supported image (PNG, JPEG, WebP, BMP, GIF, ICO).'); return; }
+    if (!ok.length) { alertError('None of the dropped files is a supported image (PNG, JPEG, WebP, AVIF, HEIC, TIFF, JPEG XL, BMP, GIF, ICO).'); return; }
     const paths = [];
     try {
       for (let i = 0; i < ok.length; i += UPLOAD_BATCH) {
@@ -803,9 +916,9 @@ class App {
     if (!this.source) this.renderEmpty();
   }
 
-  async downloadModel(id) {
+  async downloadModel(id, half = false) {
     try {
-      await post(`/models/${id}/download`);
+      await post(`/models/${id}/download${half ? '?half=true' : ''}`);
       this.pollModels();
     } catch (e) {
       alertError(e.message);
@@ -844,6 +957,8 @@ class App {
     const items = this.source.kind === 'image' ? [{ path: this.source.path }] : this.source.items;
     if (this.settings.existing === 'overwrite' && items.length > 20
       && !await confirmDlg(`Upscale ${items.length} images and overwrite results that already exist?`, { title: 'Upscale', ok: 'Upscale' })) return;
+    // In a browser, ask now (a click) whether a notification may say when a batch is done.
+    if (!NATIVE && items.length > 1 && window.Notification?.permission === 'default') Notification.requestPermission().catch(() => {});
     try {
       this.lastSummary = null;
       // A single image is always upscaled again when asked: the point is to see the new result.
@@ -894,7 +1009,7 @@ class App {
     }
     // Finished.
     const c = s => job.items.filter(i => i.status === s).length;
-    const took = fmtMs((job.finished ?? Date.now()) - (job.started ?? job.created));
+    const took = fmtMs(job.activeMs || (job.finished ?? Date.now()) - (job.started ?? job.created)); // without pauses
     const parts = [c('done') && `${c('done')} upscaled`, c('skipped') && `${c('skipped')} skipped`, c('failed') && `${c('failed')} failed`, c('cancelled') && `${c('cancelled')} cancelled`].filter(Boolean);
     this.lastSummary = job.items.length === 1
       ? (c('done') ? `Done in ${took}.` : c('failed') ? 'Failed.' : c('skipped') ? 'Skipped: the result already exists.' : 'Cancelled.')
@@ -903,8 +1018,27 @@ class App {
     const failed = job.items.find(i => i.status === 'failed');
     if (failed && job.items.length === 1) { /* shown in the viewer */ } else if (failed && c('done') === 0) alertError(failed.error || 'Upscaling failed.');
     this.renderAll();
-    if (job.status === 'done' && c('done') && document.hidden) {
-      try { new Notification('ZawUpscale', { body: this.lastSummary, icon: 'icon-256.png' }); } catch { /* not allowed */ }
+    // The taskbar button goes back to normal, or red when images failed; away from the window, say it's done.
+    native(c('failed') ? 'progress:error' : 'progress:none');
+    if (job.status === 'done' && (c('done') || c('failed')) && (document.hidden || !document.hasFocus())) {
+      if (NATIVE) {
+        native(`notify:ZawUpscale\n${this.lastSummary}`);
+        native('attention');
+      } else if (window.Notification?.permission === 'granted') {
+        try { new Notification('ZawUpscale', { body: this.lastSummary, icon: 'icon-256.png' }); } catch { /* not allowed */ }
+      }
+    }
+  }
+
+  async pause(on) {
+    if (!this.running()) return;
+    try {
+      this.job = { ...this.job, paused: on };
+      this.renderFoot();
+      await post(`/jobs/${this.job.id}/${on ? 'pause' : 'resume'}`);
+      this.status(on ? 'Paused. The current image stops at its next tile.' : 'Resumed.');
+    } catch (e) {
+      alertError(e.message);
     }
   }
 

@@ -224,6 +224,11 @@ textarea.inp { height: auto; padding: 6px 10px; resize: vertical; line-height: 1
 .result-size { font-size: 12px; color: var(--muted); margin-top: 6px; }
 .result-size b { color: var(--ink); font-weight: 600; }
 .custom-scale { width: 74px; height: 28px; text-align: center; }
+.size-box { display: flex; flex-direction: column; gap: 6px; }
+.size-box .row { align-items: center; gap: 6px; }
+.size-box select.inp { min-width: 0; }
+.inp.px { width: 76px; height: 28px; text-align: center; }
+.result-size.err { color: var(--err); }
 .quality { display: flex; align-items: center; gap: 10px; }
 .quality input[type=range] { flex: 1; }
 .quality .val { width: 54px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -247,6 +252,11 @@ details.adv > summary:hover { color: var(--ink); }
 .run-top { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .run-top .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run .bar { height: 8px; }
+.run-btns { display: flex; gap: 8px; }
+.run-btns .btn { flex: 1; justify-content: center; }
+.run.paused .bar i { background: var(--warn); }
+.paused-dot { display: inline-flex; width: 14px; height: 14px; color: var(--warn); }
+.paused-dot svg { width: 14px; height: 14px; }
 .foot-note { font-size: 12px; color: var(--muted); text-align: center; }
 .foot-note.warn { color: var(--warn); }
 

@@ -14,9 +14,13 @@ public static class Cli
           ZawUpscale upscale <file|folder>... [options]
             -m, --model <id>      Model (default: realesr-general-x4v3; see "ZawUpscale models")
             -s, --scale <n>       Scale factor, 1-32 (default 4)
+            --width <px>          Or a size: this width (the height follows)
+            --height <px>         ... this height
+            --fit <W>x<H>         ... inside this box, turned to match each image (e.g. 3840x2160)
+            --long-edge <px>      ... this long edge
             -o, --output <dir>    Output folder (default: a {model}_x{scale} subfolder)
-            -f, --format <fmt>    auto, png, jpg or webp (default auto: same as the input)
-            -q, --quality <n>     JPEG / WebP quality, 1-100 (default 92; WebP 100 is lossless)
+            -f, --format <fmt>    auto, png, jpg, webp, avif, tif or jxl (default auto: same as the input)
+            -q, --quality <n>     JPEG / WebP / AVIF / JPEG XL quality, 1-100 (default 92; 100 is lossless for WebP and JPEG XL)
             -n, --name <pattern>  Output name: {name}, {scale}, {model} (default {name})
             -r, --recursive       Include subfolders
             --overwrite           Replace existing outputs (default: skip them)
@@ -24,6 +28,10 @@ public static class Cli
             --device <id>         auto, cpu or gpu:N (default auto)
             --faces <id>          Restore faces after upscaling: gfpgan-v1.4 or codeformer
             --face-strength <n>   How much of the restored faces to blend in, 0-1 (default 0.8)
+            --detail <n>          How much of the AI's detail to keep, 0-1 (default 1; lower blends in a plain enlargement)
+            --sharpen <n>         Sharpen (up to 1) or soften (down to -1) the result (default 0)
+            --keep-colors         Give the result the original's colors and tones
+            --half                Use the model's float16 version on the GPU (download it with download --half)
           SUPIR models (see tools/supir/README.md):
             --prompt <text>       What the image shows, e.g. "a red fox kit in the grass"
             --negative <text>     Negative prompt (default: the model's)
@@ -34,7 +42,7 @@ public static class Cli
             --color-fix <mode>    wavelet, adain or none (default wavelet)
             --seed <n>            Seed (default: random; it is logged)
           ZawUpscale models                 List the models
-          ZawUpscale download <id>          Download a model
+          ZawUpscale download <id> [--half] Download a model (--half: its float16 version, for GPUs)
         """;
 
     public static int Run(string[] args)
@@ -75,7 +83,7 @@ public static class Cli
     {
         var store = new ModelStore(Options(args, []), NullLogger<ModelStore>.Instance);
         foreach (var m in store.List())
-            Console.WriteLine($"{(m.Installed ? "*" : " ")} {m.Id,-28} {m.Name}{(m.Installed ? "" : $"  (not downloaded, {m.Size / 1048576.0:0.#} MB)")}");
+            Console.WriteLine($"{(m.Installed ? "*" : " ")} {m.Id,-28} {m.Name}{(m.Installed ? (m.HalfInstalled ? (m.FullInstalled ? "  (float32 + float16)" : "  (float16)") : "") : $"  (not downloaded, {m.Size / 1048576.0:0.#} MB{(m.HalfSize is { } hs ? $"; float16 {hs / 1048576.0:0.#} MB" : "")})")}");
         Console.WriteLine();
         Console.WriteLine($"* = installed. Models folder: {store.Dir}");
         return 0;
@@ -85,10 +93,11 @@ public static class Cli
     {
         var rest = new List<string>();
         var store = new ModelStore(Options(args, rest), NullLogger<ModelStore>.Instance);
+        var half = rest.Remove("--half");
         if (rest.Count == 0) throw new ApiException("Which model? See \"ZawUpscale models\".");
         foreach (var id in rest)
         {
-            store.StartDownload(id);
+            store.StartDownload(id, half);
             while (true)
             {
                 Thread.Sleep(250);
@@ -129,6 +138,18 @@ public static class Cli
                 case "--device": s = s with { Device = Next() }; break;
                 case "--faces": s = s with { Faces = Next() }; break;
                 case "--face-strength": s = s with { FaceStrength = Number(Next()) }; break;
+                case "--width": s = s with { Size = "width", Width = int.Parse(Next()) }; break;
+                case "--height": s = s with { Size = "height", Height = int.Parse(Next()) }; break;
+                case "--long-edge": s = s with { Size = "long", LongEdge = int.Parse(Next()) }; break;
+                case "--fit":
+                    var box = Next().ToLowerInvariant().Split('x', '×');
+                    if (box.Length != 2) throw new ArgumentException("--fit takes a size like 3840x2160.");
+                    s = s with { Size = "fit", Width = int.Parse(box[0]), Height = int.Parse(box[1]) };
+                    break;
+                case "--detail": s = s with { Detail = Number(Next()) }; break;
+                case "--sharpen": s = s with { Sharpen = Number(Next()) }; break;
+                case "--keep-colors": s = s with { KeepColors = true }; break;
+                case "--half": s = s with { Half = true }; break;
                 case "--prompt": supir = supir with { Prompt = Next() }; break;
                 case "--negative": supir = supir with { NegativePrompt = Next() }; break;
                 case "--steps": supir = supir with { Steps = int.Parse(Next()) }; break;
@@ -167,7 +188,7 @@ public static class Cli
                 Console.Write("\r" + new string(' ', 70) + "\r");
                 Console.WriteLine(it.Status switch
                 {
-                    "done" => $"[{it.Index + 1}/{job.Items.Count}] {it.Input} -> {it.Output} ({it.InWidth}×{it.InHeight} → {it.OutWidth}×{it.OutHeight}{(it.Faces is { } f ? $", {f} face{(f == 1 ? "" : "s")}" : "")}, {it.Ms / 1000.0:0.0} s)",
+                    "done" => $"[{it.Index + 1}/{job.Items.Count}] {it.Input} -> {it.Output} ({it.InWidth}×{it.InHeight} → {it.OutWidth}×{it.OutHeight}{(it.Frames is { } fr ? $", {fr} frames" : "")}{(it.Faces is { } f ? $", {f} face{(f == 1 ? "" : "s")}" : "")}, {it.Ms / 1000.0:0.0} s)",
                     "skipped" => $"[{it.Index + 1}/{job.Items.Count}] {it.Input}: skipped, {it.Output} exists",
                     _ => $"[{it.Index + 1}/{job.Items.Count}] {it.Input}: {it.Status}{(it.Error != null ? " - " + it.Error : "")}",
                 });

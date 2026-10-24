@@ -72,11 +72,14 @@ public sealed class Files(AppOptions opts)
     /// Expands the inputs (files and folders) into the images to upscale. Rel is the path below the folder
     /// it was found in, so a batch can keep its folder structure in the output folder.
     /// </summary>
+    /// <summary>A size as results are labeled with it (<see cref="Jobs.SizeLabel"/>): "x4", "x2.5", "w3840", "h2160", "3840x2160" or "long4000".</summary>
+    const string SizeLabel = @"(?:x[0-9]+(?:\.[0-9]+)?|w[0-9]+|h[0-9]+|[0-9]+x[0-9]+|long[0-9]+)";
+
     public static ScanResult Scan(IEnumerable<string> inputs, bool recursive, string? nameTemplate = null, IEnumerable<string>? modelIds = null)
     {
-        // Results folders ("realesr-general-x4v3_x4", "…_x4_faces") found below an opened folder hold earlier results.
+        // Results folders ("realesr-general-x4v3_x4", "…_w3840", "…_x4_faces") found below an opened folder hold earlier results.
         var resultsFolder = modelIds?.Any() == true
-            ? new Regex($"^(?:{string.Join('|', modelIds.Select(Regex.Escape))})_x[0-9]+(?:\\.[0-9]+)?(?:_faces)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+            ? new Regex($"^(?:{string.Join('|', modelIds.Select(Regex.Escape))})_{SizeLabel}(?:_faces)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
             : null;
         var inResults = 0;
         var items = new List<JobItemRequest>();
@@ -139,7 +142,7 @@ public sealed class Files(AppOptions opts)
             switch (part.ToLowerInvariant())
             {
                 case "{name}": sb.Append(named ? @"\k<name>" : "(?<name>.+?)"); named = true; break; // lazy: "{name}-{model}" with a dashed model id
-                case "{scale}": sb.Append(@"[0-9]+(?:\.[0-9]+)?"); break;
+                case "{scale}": sb.Append($"(?:[0-9]+(?:\\.[0-9]+)?|{SizeLabel})"); break;
                 case "{model}": sb.Append(@"[^\\/]+"); break;
                 default: sb.Append(Regex.Escape(part)); break;
             }

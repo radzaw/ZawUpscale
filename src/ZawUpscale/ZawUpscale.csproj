@@ -48,6 +48,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.12" />
     <PackageReference Include="Photino.NET" Version="4.0.16" />
+    <!-- AVIF, HEIC, TIFF and JPEG XL, and animated GIF and WebP frames, which Skia can't read or write. -->
+    <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="14.17.2" />
     <PackageReference Include="SkiaSharp" Version="4.153.1" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.153.1" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" Condition="'$(ZawGpu)' == 'directml'" />

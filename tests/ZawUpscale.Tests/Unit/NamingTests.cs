@@ -57,7 +57,11 @@ public sealed class NamingTests : IDisposable
     public void Invalid_settings_are_refused()
     {
         Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { Scale = 0.5 }));
-        Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { Format = "tiff" }));
+        Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { Format = "bmp" }));
+        Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { Size = "fit", Width = 3840 }));
+        Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { Size = "huge" }));
+        Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { Detail = 1.5 }));
+        Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { Sharpen = -2 }));
         Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { NameTemplate = "a/b" }));
         Assert.Throws<ApiException>(() => Jobs.Validate(new UpscaleSettings { Existing = "ask" }));
     }

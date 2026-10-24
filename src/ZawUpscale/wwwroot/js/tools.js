@@ -34,15 +34,24 @@ export function modelsDialog(app) {
           load();
         } });
       } else {
-        act = h('button', { class: 'btn small', html: icon('download') + `<span>Download</span>`, onclick: () => post(`/models/${m.id}/download`).then(load).catch(e => alertError(e.message)) });
+        const half = app.wantsHalf(m);
+        act = h('button', { class: 'btn small', title: half ? 'The float16 version (Preferences)' : '', html: icon('download') + `<span>Download${half ? ' float16' : ''}</span>`,
+          onclick: () => post(`/models/${m.id}/download${half ? '?half=true' : ''}`).then(load).catch(e => alertError(e.message)) });
       }
+      // A model with a float16 version: which versions are here, and a link to get the other one.
+      const get16 = (half, label) => h('button', { class: 'linkbtn', disabled: busy, onclick: () => post(`/models/${m.id}/download${half ? '?half=true' : ''}`).then(load).catch(e => alertError(e.message)) }, label);
+      const versions = m.halfSize && m.installed ? h('div', { class: 'mdesc' },
+        m.fullInstalled && m.halfInstalled ? 'float32 and float16 versions downloaded.'
+          : m.halfInstalled ? ['float16 version. ', get16(false, `Get float32 (${fmtBytes(m.size)})`)]
+            : ['float32 version. ', get16(true, `Get float16 for the GPU (${fmtBytes(m.halfSize)})`)]) : null;
       return h('tr', null,
         h('td', null,
           h('div', null, h('b', null, m.name), m.installed ? h('span', { class: 'tag ok' }, 'Installed') : null, m.kind === 'supir' ? h('span', { class: 'tag' }, 'SUPIR') : m.kind === 'face' ? h('span', { class: 'tag' }, 'Faces') : !m.builtIn ? h('span', { class: 'tag' }, 'Custom') : null),
           h('div', { class: 'mdesc' }, m.description),
           d?.error ? h('div', { class: 'mdesc', style: { color: 'var(--err)' } }, 'Download failed: ' + d.error) : null,
           m.error ? h('div', { class: 'mdesc', style: { color: 'var(--err)' } }, m.error) : null,
-          m.builtIn ? h('div', { class: 'mdesc' }, `${m.license} · ${fmtBytes(m.size)} · `, h('span', { class: 'mono' }, m.id)) : h('div', { class: 'mdesc' }, fmtBytes(m.size), ' · ', h('span', { class: 'mono' }, m.id + (m.kind === 'supir' ? '/' : '.onnx')))),
+          versions,
+          m.builtIn ? h('div', { class: 'mdesc' }, `${m.license} · ${fmtBytes(m.size)}${m.halfSize ? ` (float16 ${fmtBytes(m.halfSize)})` : ''} · `, h('span', { class: 'mono' }, m.id)) : h('div', { class: 'mdesc' }, fmtBytes(m.size), ' · ', h('span', { class: 'mono' }, m.id + (m.kind === 'supir' ? '/' : '.onnx')))),
         h('td', { class: 'act' }, act));
     }));
   };
@@ -95,6 +104,7 @@ export async function preferencesDialog(app) {
   const device = h('select', { class: 'inp' }, app.system.devices.map(d => h('option', { value: d.id, selected: s.device === d.id }, d.name + (d.detail ? ` — ${d.detail}` : ''))));
   const tile = h('select', { class: 'inp' }, [0, 128, 192, 256, 384, 512, 768, 1024].map(t => h('option', { value: t, selected: (s.tile || 0) === t }, t ? `${t} px` : 'Automatic')));
   const pixel = h('input', { type: 'checkbox', checked: p.pixelated });
+  const half = h('input', { type: 'checkbox', checked: !!s.half, disabled: !app.system.gpuSupport });
   const r = await modal({
     title: 'Preferences',
     width: 560,
@@ -104,6 +114,8 @@ export async function preferencesDialog(app) {
       h('div', { class: 'sm-sep' }, 'Processing'),
       h('label', { class: 'frow' }, h('span', null, 'Device'), device),
       h('label', { class: 'frow' }, h('span', null, 'Tile size'), tile),
+      h('div', { class: 'frow', title: 'Models with a float16 version are downloaded in it and run with it on the GPU: 10–20% faster, half the download and GPU memory, practically the same result. On the CPU float32 is used, being faster there.' },
+        h('span', null, 'Precision'), h('label', { class: 'chk' }, half, 'Half precision (float16) on the GPU')),
       h('div', { class: 'hint' }, 'Images are processed in tiles. Larger tiles are a little faster but need more memory; if the GPU runs out, the tile size is halved automatically. SUPIR has its own tiles (1024 px, smaller if memory runs out). ' +
         (GPU_NOTES[app.system.gpuBackend] || 'This build runs on the CPU. For an NVIDIA GPU on Linux, use the linux-x64-cuda build.')),
       app.system.gpuError ? h('div', { class: 'hint', style: { color: 'var(--err)' } }, 'The GPU could not be used: ' + app.system.gpuError) : null),
@@ -114,6 +126,7 @@ export async function preferencesDialog(app) {
   p.pixelated = pixel.checked;
   s.device = device.value;
   s.tile = parseInt(tile.value, 10) || 0;
+  s.half = half.checked;
   app.applyPrefs();
   app.settingsChanged();
 }

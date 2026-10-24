@@ -92,7 +92,7 @@ public static class Api
 
         // ---- models ----
         api.MapGet("/models", (ModelStore m) => RunSync(() => m.List()));
-        api.MapPost("/models/{id}/download", (string id, ModelStore m) => RunSync(() => { m.StartDownload(id); return null; }));
+        api.MapPost("/models/{id}/download", (string id, bool? half, ModelStore m) => RunSync(() => { m.StartDownload(id, half == true); return null; }));
         api.MapPost("/models/{id}/cancel", (string id, ModelStore m) => RunSync(() => { m.CancelDownload(id); return null; }));
         api.MapPost("/models/{id}/clear", (string id, ModelStore m) => RunSync(() => { m.ClearDownload(id); return null; }));
         api.MapDelete("/models/{id}", (string id, ModelStore m, Engine e) => RunSync(() =>
@@ -134,6 +134,12 @@ public static class Api
         {
             var full = Path.GetFullPath(path);
             if (!ImageIO.IsImage(full) || !File.Exists(full)) return Results.NotFound();
+            // TIFF, HEIC and JPEG XL aren't shown by web views: send those as PNG.
+            if (!ImageIO.IsWebImage(full))
+            {
+                try { return Results.File(ImageIO.ToPng(full), "image/png"); }
+                catch (Exception ex) when (ex is ApiException or IOException) { return Results.NotFound(); }
+            }
             ContentTypes.TryGetContentType(full, out var type);
             return Results.File(full, type ?? "application/octet-stream", enableRangeProcessing: false);
         });
@@ -166,5 +172,7 @@ public static class Api
         api.MapGet("/jobs", (Jobs jobs) => RunSync(() => jobs.List()));
         api.MapGet("/jobs/{id}", (string id, Jobs jobs) => RunSync(() => jobs.Get(id) ?? throw new ApiException("No such job.")));
         api.MapPost("/jobs/{id}/cancel", (string id, Jobs jobs) => RunSync(() => new { cancelled = jobs.Cancel(id) }));
+        api.MapPost("/jobs/{id}/pause", (string id, Jobs jobs) => RunSync(() => new { paused = jobs.Pause(id) }));
+        api.MapPost("/jobs/{id}/resume", (string id, Jobs jobs) => RunSync(() => new { resumed = jobs.Resume(id) }));
     }
 }

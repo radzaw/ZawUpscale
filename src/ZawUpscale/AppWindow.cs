@@ -95,11 +95,26 @@ public sealed class AppWindow(AppOptions opts, ILogger<AppWindow> log)
         catch (ApplicationException) { /* not created yet or already gone */ }
     }
 
-    /// <summary>Messages from the page: "theme:dark" / "theme:light" so the title bar matches the app.</summary>
+    /// <summary>
+    /// Messages from the page: "theme:dark" / "theme:light" so the title bar matches the app; "progress:0.42",
+    /// "progress:paused", "progress:error" and "progress:none" for the taskbar button; "attention" to flash it; and
+    /// "notify:title\nbody" for a system notification.
+    /// </summary>
     void OnMessage(PhotinoWindow w, string? message)
     {
+        if (message == null) return;
         if (message is "theme:dark" or "theme:light" && OperatingSystem.IsWindows())
             DarkTitleBar(w.WindowHandle, message == "theme:dark");
+        else if (message.StartsWith("progress:") && OperatingSystem.IsWindows())
+            Taskbar.SetProgress(w.WindowHandle, message["progress:".Length..]);
+        else if (message == "attention" && OperatingSystem.IsWindows())
+            Taskbar.Flash(w.WindowHandle);
+        else if (message.StartsWith("notify:"))
+        {
+            var text = message["notify:".Length..].Split('\n', 2);
+            try { w.SendNotification(text[0], text.Length > 1 ? text[1] : ""); }
+            catch (Exception ex) when (ex is ApplicationException or InvalidOperationException) { log.LogDebug("No notification: {Message}", ex.Message); }
+        }
     }
 
     public string[]? OpenFiles(string title, string? start, bool multiple, (string Name, string[] Extensions)[] filters) =>

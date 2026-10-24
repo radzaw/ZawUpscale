@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using ImageMagick;
 using SkiaSharp;
 
 namespace ZawUpscale;
@@ -33,24 +34,44 @@ public sealed class RgbaImage
 /// <summary>Reading, writing and resizing images with SkiaSharp.</summary>
 public static class ImageIO
 {
-    /// <summary>Extensions that can be read (Skia decoders available on every platform).</summary>
-    public static readonly string[] InputExtensions = [".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif", ".ico"];
+    /// <summary>Formats Skia has no codec for on every platform, read (and except HEIC, written) with ImageMagick. (Declared first: static fields initialize in order.)</summary>
+    static readonly string[] MagickExtensions = [".avif", ".heic", ".heif", ".tif", ".tiff", ".jxl"];
 
-    public static readonly string[] OutputFormats = ["png", "jpg", "webp"];
+    /// <summary>Extensions that can be read: Skia's formats, and ImageMagick's <see cref="MagickExtensions"/>.</summary>
+    public static readonly string[] InputExtensions = [".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif", ".ico", .. MagickExtensions];
+
+    public static readonly string[] OutputFormats = ["png", "jpg", "webp", "avif", "tif", "jxl"];
 
     public static bool IsImage(string path) => InputExtensions.Contains(Path.GetExtension(path).ToLowerInvariant());
+
+    static bool IsMagick(string path) => MagickExtensions.Contains(Path.GetExtension(path).ToLowerInvariant());
+
+    /// <summary>True for formats every web view shows; the viewer is sent the others converted to PNG.</summary>
+    public static bool IsWebImage(string path) => Path.GetExtension(path).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".jfif" or ".webp" or ".bmp" or ".gif" or ".ico" or ".avif";
+
+    /// <summary>The file extension for an output format.</summary>
+    public static string ExtensionOf(string format) => format switch { "jpg" => ".jpg", "webp" => ".webp", "avif" => ".avif", "tif" => ".tif", "jxl" => ".jxl", "gif" => ".gif", _ => ".png" };
 
     /// <summary>Width and height of an image file (as displayed, after EXIF orientation), without decoding its pixels.</summary>
     public static (int Width, int Height)? Probe(string path)
     {
         try
         {
-            using var codec = SKCodec.Create(path);
-            if (codec == null) return null;
-            var (w, h) = (codec.Info.Width, codec.Info.Height);
-            return SwapsAxes(codec.EncodedOrigin) ? (h, w) : (w, h);
+            if (!IsMagick(path))
+            {
+                using var codec = SKCodec.Create(path);
+                if (codec != null)
+                {
+                    var (w, h) = (codec.Info.Width, codec.Info.Height);
+                    return SwapsAxes(codec.EncodedOrigin) ? (h, w) : (w, h);
+                }
+            }
+            using var m = new MagickImage();
+            m.Ping(path);
+            var swap = m.Orientation is OrientationType.LeftTop or OrientationType.RightTop or OrientationType.RightBottom or OrientationType.LeftBottom;
+            return swap ? ((int)m.Height, (int)m.Width) : ((int)m.Width, (int)m.Height);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or MagickException)
         {
             return null;
         }
@@ -59,8 +80,126 @@ public static class ImageIO
     public static RgbaImage Load(string path)
     {
         if (!File.Exists(path)) throw new ApiException($"File not found: {path}");
+        if (IsMagick(path)) return LoadMagick(path);
         using var stream = File.OpenRead(path);
         return Load(stream, path);
+    }
+
+    /// <summary>Reads the first image of a file with ImageMagick: oriented, in sRGB, 8 bits per channel.</summary>
+    static RgbaImage LoadMagick(string path)
+    {
+        try
+        {
+            using var m = new MagickImage(path);
+            m.AutoOrient();
+            // Wide-gamut photos (Display P3 from phones, Adobe RGB) would look washed out if their numbers were taken as
+            // sRGB. Profiles that are sRGB already (JPEG XL always carries one, without a description) are left alone:
+            // converting them anyway shifts values by one here and there.
+            var profile = m.GetColorProfile();
+            if (profile is { Description: { Length: > 0 } d } && !d.Contains("sRGB", StringComparison.OrdinalIgnoreCase))
+                m.TransformColorSpace(ColorProfiles.SRGB);
+            var img = new RgbaImage((int)m.Width, (int)m.Height);
+            using var pixels = m.GetPixelsUnsafe();
+            var bytes = pixels.ToByteArray(PixelMapping.RGBA) ?? throw new ApiException($"Could not decode {Path.GetFileName(path)}.");
+            Buffer.BlockCopy(bytes, 0, img.Pixels, 0, img.Pixels.Length);
+            return img;
+        }
+        catch (MagickException ex)
+        {
+            throw new ApiException($"Unsupported or damaged image: {Path.GetFileName(path)} ({ex.Message.Split('`', '@')[0].Trim()})");
+        }
+    }
+
+    /// <summary>Number of frames: more than one for an animated GIF or WebP.</summary>
+    public static int FrameCount(string path)
+    {
+        if (Path.GetExtension(path).ToLowerInvariant() is not (".gif" or ".webp")) return 1;
+        try
+        {
+            using var codec = SKCodec.Create(path);
+            return codec == null ? 1 : Math.Max(1, codec.FrameCount);
+        }
+        catch (IOException) { return 1; }
+    }
+
+    /// <summary>An animation: full frames (each already composed over the previous ones), their durations and the loop count (0 = forever).</summary>
+    public sealed record Animation(List<RgbaImage> Frames, List<int> DelaysMs, int Loops);
+
+    public static Animation LoadAnimation(string path)
+    {
+        try
+        {
+            using var frames = new MagickImageCollection(path);
+            frames.Coalesce();
+            var list = new List<RgbaImage>();
+            var delays = new List<int>();
+            foreach (var f in frames)
+            {
+                var img = new RgbaImage((int)f.Width, (int)f.Height);
+                using var pixels = f.GetPixelsUnsafe();
+                Buffer.BlockCopy(pixels.ToByteArray(PixelMapping.RGBA)!, 0, img.Pixels, 0, img.Pixels.Length);
+                list.Add(img);
+                delays.Add((int)Math.Round(f.AnimationDelay * 1000.0 / Math.Max(1, f.AnimationTicksPerSecond)));
+            }
+            return new Animation(list, delays, (int)frames[0].AnimationIterations);
+        }
+        catch (MagickException ex)
+        {
+            throw new ApiException($"Could not read the frames of {Path.GetFileName(path)}: {ex.Message.Split('`', '@')[0].Trim()}");
+        }
+    }
+
+    /// <summary>Writes an animated GIF or WebP (written next to the target and moved into place, like <see cref="Save"/>).</summary>
+    public static void SaveAnimation(Animation a, string path, string format, int quality)
+    {
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        var tmp = path + ".part";
+        try
+        {
+            using (var frames = new MagickImageCollection())
+            {
+                for (var i = 0; i < a.Frames.Count; i++)
+                {
+                    var f = ToMagick(a.Frames[i]);
+                    f.AnimationTicksPerSecond = 100;
+                    f.AnimationDelay = (uint)Math.Max(1, Math.Round(a.DelaysMs[i] / 10.0));
+                    f.AnimationIterations = (uint)a.Loops;
+                    f.GifDisposeMethod = GifDisposeMethod.Background; // every frame is complete
+                    if (format == "webp")
+                    {
+                        f.Quality = (uint)Math.Clamp(quality, 1, 100);
+                        if (quality >= 100) f.Settings.SetDefine(MagickFormat.WebP, "lossless", true);
+                    }
+                    frames.Add(f);
+                }
+                if (format == "gif") frames.Quantize(new QuantizeSettings { Colors = 256, DitherMethod = DitherMethod.FloydSteinberg });
+                frames.Write(tmp, format == "webp" ? MagickFormat.WebP : MagickFormat.Gif);
+            }
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(tmp); } catch (IOException) { /* best effort */ }
+            throw;
+        }
+    }
+
+    static MagickImage ToMagick(RgbaImage img)
+    {
+        var m = new MagickImage(img.Pixels, new PixelReadSettings((uint)img.Width, (uint)img.Height, StorageType.Char, PixelMapping.RGBA));
+        if (!img.HasAlpha()) m.Alpha(AlphaOption.Off);
+        return m;
+    }
+
+    /// <summary>A PNG of any readable image, for the viewer when the web view can't show the format itself.</summary>
+    public static byte[] ToPng(string path)
+    {
+        var img = Load(path);
+        using var ms = new MemoryStream();
+        // Fast compression: it's sent once over the loopback to be shown.
+        WithBitmap(img, bmp => { using var pixmap = bmp.PeekPixels(); return pixmap.Encode(ms, new SKPngEncoderOptions(SKPngEncoderFilterFlags.NoFilters, 1)); });
+        return ms.ToArray();
     }
 
     public static RgbaImage Load(Stream stream, string nameForErrors = "image")
@@ -163,9 +302,14 @@ public static class ImageIO
         for (var i = 0; i < t.Length; i += 4) t[i + 3] = big[i];
     }
 
-    /// <summary>Encodes to png, jpg or webp. JPEG has no alpha, so transparent areas are put on white.</summary>
+    /// <summary>Encodes to png, jpg, webp, avif, tif or jxl. JPEG has no alpha, so transparent areas are put on white.</summary>
     public static void Save(RgbaImage img, string path, string format, int quality)
     {
+        if (format is "avif" or "tif" or "jxl")
+        {
+            SaveMagick(img, path, format, quality);
+            return;
+        }
         quality = Math.Clamp(quality, 1, 100);
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -204,6 +348,36 @@ public static class ImageIO
         }
     }
 
+    /// <summary>AVIF and JPEG XL (lossless at quality 100) and TIFF (lossless, zip-compressed) with ImageMagick.</summary>
+    static void SaveMagick(RgbaImage img, string path, string format, int quality)
+    {
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        var tmp = path + ".part";
+        try
+        {
+            using (var m = ToMagick(img))
+            {
+                m.Quality = (uint)quality;
+                if (format == "tif") m.Settings.Compression = CompressionMethod.Zip;
+                // AV1's default effort makes large images take minutes; 6 of 0–9 is a good balance.
+                if (format == "avif") m.Settings.SetDefine(MagickFormat.Heic, "speed", "6");
+                m.Write(tmp, format switch { "avif" => MagickFormat.Avif, "jxl" => MagickFormat.Jxl, _ => MagickFormat.Tiff });
+            }
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch (MagickException ex)
+        {
+            try { File.Delete(tmp); } catch (IOException) { /* best effort */ }
+            throw new ApiException($"Could not save as {format.ToUpperInvariant()}: {ex.Message.Split('`', '@')[0].Trim()}");
+        }
+        catch
+        {
+            try { File.Delete(tmp); } catch (IOException) { /* best effort */ }
+            throw;
+        }
+    }
+
     static RgbaImage FlattenOnWhite(RgbaImage src)
     {
         var dst = new RgbaImage(src.Width, src.Height, (byte[])src.Pixels.Clone());
@@ -221,13 +395,18 @@ public static class ImageIO
     /// <summary>A JPEG thumbnail that fits in size×size (transparency shown on a light checkerboard is the UI's job; here it's flattened on white).</summary>
     public static byte[] Thumbnail(string path, int size)
     {
-        using var codec = SKCodec.Create(path) ?? throw new ApiException("Unsupported image.");
-        // Let the decoder skip work for big JPEGs by decoding at a reduced scale.
-        var scale = Math.Min(1f, (float)size * 2 / Math.Max(codec.Info.Width, codec.Info.Height));
-        var dims = codec.GetScaledDimensions(scale);
-        var scaled = new RgbaImage(dims.Width, dims.Height);
-        // Some codecs can't scale while decoding; those are decoded at full size instead.
-        var img = DecodeInto(codec, scaled) ? Orient(scaled, codec.EncodedOrigin) : Load(path);
+        RgbaImage img;
+        if (IsMagick(path)) img = Load(path);
+        else
+        {
+            using var codec = SKCodec.Create(path) ?? throw new ApiException("Unsupported image.");
+            // Let the decoder skip work for big JPEGs by decoding at a reduced scale.
+            var scale = Math.Min(1f, (float)size * 2 / Math.Max(codec.Info.Width, codec.Info.Height));
+            var dims = codec.GetScaledDimensions(scale);
+            var scaled = new RgbaImage(dims.Width, dims.Height);
+            // Some codecs can't scale while decoding; those are decoded at full size instead.
+            img = DecodeInto(codec, scaled) ? Orient(scaled, codec.EncodedOrigin) : Load(path);
+        }
         var k = Math.Min(1.0, (double)size / Math.Max(img.Width, img.Height));
         var thumb = Resize(img, Math.Max(1, (int)Math.Round(img.Width * k)), Math.Max(1, (int)Math.Round(img.Height * k)));
         thumb = FlattenOnWhite(thumb);
