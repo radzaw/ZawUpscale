@@ -59,7 +59,10 @@ public static class Api
             runtime = Environment.Version.ToString(),
             onnxRuntime = OrtEnv.Instance().GetVersionString(),
         }));
-        api.MapGet("/system", (Engine engine, ModelStore models) => RunSync(() => new
+        // Newer release on GitHub? Asked for by the UI (at most daily unless force), never on its own.
+        api.MapGet("/updates", (bool? force, Updates u, CancellationToken ct) => Run(async () => await u.Check(force == true, ct)));
+        api.MapPost("/updates/open", (PathRequest r) => RunSync(() => { Updates.Open(r.Path); return null; }));
+        api.MapGet("/system",(Engine engine, ModelStore models) => RunSync(() => new
         {
             devices = Engine.Devices(),
             gpuSupport = Engine.HasGpu,

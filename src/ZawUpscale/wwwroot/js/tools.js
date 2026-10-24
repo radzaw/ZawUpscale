@@ -1,4 +1,4 @@
-// Dialogs: models, preferences, keyboard shortcuts, about.
+// Dialogs: models, preferences, keyboard shortcuts, about, updates.
 import { get, post, del } from './api.js';
 import { h, fmtBytes } from './util.js';
 import { icon } from './icons.js';
@@ -105,12 +105,15 @@ export async function preferencesDialog(app) {
   const tile = h('select', { class: 'inp' }, [0, 128, 192, 256, 384, 512, 768, 1024].map(t => h('option', { value: t, selected: (s.tile || 0) === t }, t ? `${t} px` : 'Automatic')));
   const pixel = h('input', { type: 'checkbox', checked: p.pixelated });
   const half = h('input', { type: 'checkbox', checked: !!s.half, disabled: !app.system.gpuSupport });
+  const updates = h('input', { type: 'checkbox', checked: p.checkUpdates });
   const r = await modal({
     title: 'Preferences',
     width: 560,
     body: h('div', { class: 'form2' },
       h('label', { class: 'frow' }, h('span', null, 'Theme'), theme),
       h('div', { class: 'frow' }, h('span', null, 'Viewer'), h('label', { class: 'chk' }, pixel, 'Show pixels sharply when zoomed in to 200% and more')),
+      h('div', { class: 'frow', title: 'Once a day at most, ZawUpscale asks GitHub for its latest release and tells you if it is newer. Nothing else is sent, and nothing is installed by itself.' },
+        h('span', null, 'Updates'), h('label', { class: 'chk' }, updates, 'Tell me when a new version is out')),
       h('div', { class: 'sm-sep' }, 'Processing'),
       h('label', { class: 'frow' }, h('span', null, 'Device'), device),
       h('label', { class: 'frow' }, h('span', null, 'Tile size'), tile),
@@ -124,6 +127,10 @@ export async function preferencesDialog(app) {
   if (!r) return;
   p.theme = theme.value;
   p.pixelated = pixel.checked;
+  const checkNow = updates.checked && !p.checkUpdates;
+  p.checkUpdates = updates.checked;
+  if (checkNow) app.checkUpdates(false);
+  app.renderUpdate();
   s.device = device.value;
   s.tile = parseInt(tile.value, 10) || 0;
   s.half = half.checked;
@@ -154,9 +161,45 @@ export function aboutDialog(app) {
     width: 460,
     body: h('div', { class: 'about' }, h('img', { src: 'icon-256.png', width: 64, height: 64, alt: '' }),
       h('div', null, h('h2', null, 'ZawUpscale'),
-        h('p', null, `Version ${v?.version ?? '?'}`),
+        h('p', null, `Version ${v?.version ?? '?'}`,
+          app.update?.newer ? [' · ', h('a', { href: '#', onclick: e => { e.preventDefault(); updateDialog(app, app.update); } }, `${app.update.latest} is out`)]
+            : app.update && !app.update.error && app.update.latest ? h('span', { class: 'muted' }, ' · the newest') : null),
         h('p', null, 'AI image upscaling for single images and whole folders, with Real-ESRGAN models running on your GPU or CPU, and SUPIR on your GPU.'),
         h('p', { class: 'muted' }, `ONNX Runtime ${v?.onnxRuntime ?? '?'} · .NET ${v?.runtime ?? ''}`),
         h('p', { class: 'muted' }, v?.os ?? ''))),
   });
+}
+
+// ---------------------------------------------------------------- updates
+
+const fmtDate = d => new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+// Release notes are Markdown: drop the heading and bold marks, and show list items as bullets.
+const plainNotes = s => s.replace(/^#{1,6}\s*/gm, '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/^\s*[-*]\s+/gm, '• ');
+
+// A newer release: what's in it, and where to get it. Nothing is installed: the browser downloads the new file.
+export async function updateDialog(app, u) {
+  const notes = plainNotes((u.notes || '').trim());
+  const r = await modal({
+    title: 'A new version is out',
+    width: 540,
+    body: h('div', { class: 'update' },
+      h('p', null, `ZawUpscale ${u.latest} is available. You have ${u.current}.`),
+      u.published ? h('p', { class: 'muted' }, 'Released ' + fmtDate(u.published)) : null,
+      notes ? h('div', { class: 'update-notes' }, notes.length > 4000 ? notes.slice(0, 4000) + '…' : notes) : null,
+      h('p', { class: 'hint' }, u.download
+        ? 'Download opens in your browser. Close ZawUpscale and put the new file in place of this one: your models and settings are kept.'
+        : 'Pick the file for your system on the release page. Your models and settings are kept.')),
+    buttons: [
+      { label: 'Skip this version', value: 'skip', align: 'left' },
+      { label: u.download ? 'Download' : 'Open the release page', primary: true, value: 'get' },
+      u.download ? { label: 'Release page', value: 'page' } : null,
+      { label: 'Later', value: null },
+    ].filter(Boolean),
+  });
+  if (r === 'get' || r === 'page') post('/updates/open', { path: r === 'get' && u.download ? u.download : u.url }).catch(e => alertError(e.message));
+  if (r === 'skip') {
+    app.prefs.skipVersion = u.latest;
+    app.saveStateSoon();
+    app.renderUpdate();
+  }
 }

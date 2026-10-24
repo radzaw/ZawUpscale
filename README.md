@@ -35,6 +35,7 @@ The backend is an ASP.NET Core app that runs the AI models with [ONNX Runtime](h
 - **Batches**: a grid of thumbnails with live progress, status and timing per image, and an estimate of the time left. Click a finished image to compare it. One failing image doesn't stop the rest. **Pause** stops at the next tile and **Resume** goes on from there. On Windows the taskbar button shows the progress (yellow while paused, red if images failed), and when a batch finishes while you're in another window, a notification says so and the button flashes.
 - **Output**: the same format as the original (HEIC becomes JPEG), or PNG, JPEG, WebP, AVIF, TIFF or JPEG XL (with a quality setting, where WebP and JPEG XL at 100 are lossless; PNG and TIFF always are), saved in a subfolder of the opened folder named after the model and size (`realesr-general-x4v3_x4`, `…_3840x2160`), or in a folder of your choice (keeping the subfolder structure either way). Results keep the original's name by default; a pattern can change it, with `{name}`, `{scale}` and `{model}` filled in (`{name}_x{scale}` gives `photo_x4.png`). Existing files can be skipped (so an interrupted batch can simply be run again), overwritten or kept with a number added. Earlier results (those subfolders, or `photo_x4.png` next to `photo.jpg`) aren't picked up as new inputs.
 - **Command line**: `ZawUpscale upscale <files or folders>` for scripts (see below).
+- **Update notice**: once a day ZawUpscale asks GitHub for its latest release; if it's newer, the status bar says so, and a click shows what's new with a download for your system. Nothing is installed by itself. Help → Check for updates asks right away; Preferences turns it off, and *Skip this version* hides one release.
 - **Light and dark themes** (or follow the system), and keyboard shortcuts.
 
 ### Keyboard shortcuts
@@ -60,6 +61,7 @@ ZawUpscale upscale ~/Pictures/scans -r -s 2 -f png -o ~/Pictures/scans-2x
 ZawUpscale upscale art.png -m realesrgan-x4plus-anime -n "{name}-{model}"
 ZawUpscale models                                    # list the models (* = installed)
 ZawUpscale download realesrgan-x4plus                # download one (--half: its float16 version)
+ZawUpscale check-update                              # is a newer version out? (exit code 2 if so)
 ZawUpscale upscale ~/Pictures/phone --fit 3840x2160 -f avif   # HEIC photos to 4K AVIFs
 ZawUpscale upscale family.jpg --faces gfpgan-v1.4         # upscale and restore the faces
 ZawUpscale upscale old-scan.jpg -m supir-v0q -s 2 --prompt "a family on a beach, 1970s photo"
@@ -77,6 +79,7 @@ Everything is kept in the configuration directory (`%APPDATA%\ZawUpscale` on Win
 | --- | --- |
 | `models/` | The downloaded models, your own `.onnx` files, and SUPIR model folders |
 | `state.json` | Upscale settings, preferences, last folders |
+| `update.json` | The last update check (the newest release on GitHub, and when it was checked) |
 | `inbox/` | Copies of images dropped on or pasted into the window (cleared after a week) |
 | `webview/` | The native window's web view data and icon |
 | `browser/` | The browser profile, when the fallback browser window is used |
@@ -88,6 +91,7 @@ The originals are never changed. Results of dropped and pasted images are saved 
 - The backend listens on **127.0.0.1 only**, on a random port.
 - Every API call must carry a random per-process token, which is passed to the window in the URL fragment. Other web pages and local programs can't use ZawUpscale to read your files.
 - Only image files are served to the window.
+- Apart from model downloads you start, ZawUpscale only goes online for the daily update check, which asks GitHub's releases API for the latest version and sends nothing but `ZawUpscale/<version>` as its user agent. It can be turned off in Preferences. Release links are opened only if they point to this project on GitHub.
 
 ## Requirements
 
@@ -142,7 +146,7 @@ src/ZawUpscale/
   AppWindow.cs                            the native window (Photino) and its open dialogs
   BrowserLauncher.cs, Heartbeat.cs        fallback browser window; quit when the last one closes
   Api.cs                                  /api endpoints
-  Cli.cs                                  the upscale / models / download commands
+  Cli.cs                                  the upscale / models / download / check-update commands
   Upscaler.cs                             tiling, multi-pass planning, alpha
   Engine.cs                               ONNX Runtime sessions, devices, out-of-memory retry
   Gpu.cs                                  DirectX adapter list (DXGI)
@@ -151,6 +155,7 @@ src/ZawUpscale/
                                           sampler and latent tiling, ONNX Runtime sessions
   Jobs.cs                                 the job queue, output names, existing files
   Files.cs                                file browser, folder scans, drops, reveal in folder
+  Updates.cs                              the update check (GitHub releases)
   ImageIO.cs                              decoding, encoding, resizing, thumbnails (SkiaSharp)
   wwwroot/                                the UI (embedded into the executable)
     js/app.js                             layout, menus, settings panel, batches, drop and paste

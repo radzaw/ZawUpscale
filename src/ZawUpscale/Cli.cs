@@ -7,7 +7,7 @@ namespace ZawUpscale;
 /// <summary>Command-line mode: upscale files and folders, list and download models, without opening a window.</summary>
 public static class Cli
 {
-    public static readonly string[] Commands = ["upscale", "models", "download"];
+    public static readonly string[] Commands = ["upscale", "models", "download", "check-update"];
 
     public const string HelpText = """
         Command line:
@@ -43,6 +43,7 @@ public static class Cli
             --seed <n>            Seed (default: random; it is logged)
           ZawUpscale models                 List the models
           ZawUpscale download <id> [--half] Download a model (--half: its float16 version, for GPUs)
+          ZawUpscale check-update           Ask GitHub whether a newer version is out (exit code 2 if so)
         """;
 
     public static int Run(string[] args)
@@ -55,6 +56,7 @@ public static class Cli
             {
                 "models" => ListModels(args),
                 "download" => Download(args),
+                "check-update" => CheckUpdate(args),
                 _ => Upscale(args),
             };
         }
@@ -111,6 +113,21 @@ public static class Cli
             }
         }
         return 0;
+    }
+
+    static int CheckUpdate(string[] args)
+    {
+        var u = new Updates(Options(args, [])).Check(force: true).GetAwaiter().GetResult();
+        if (u.Error != null) throw new ApiException(u.Error);
+        if (!u.Newer)
+        {
+            Console.WriteLine(u.Latest == null ? $"ZawUpscale {u.Current}: no releases are published yet." : $"ZawUpscale {u.Current} is up to date.");
+            return 0;
+        }
+        Console.WriteLine($"ZawUpscale {u.Latest} is out (this is {u.Current}).");
+        Console.WriteLine($"  {u.Url}");
+        if (u.Download != null) Console.WriteLine($"  Download for this computer: {u.Download}");
+        return 2;
     }
 
     static int Upscale(string[] args)

@@ -2,12 +2,12 @@
 import { get, post, put, startHeartbeat, token, urlWithToken } from './api.js';
 import { h, debounce, makeSplitter, fmtBytes, fmtMs } from './util.js';
 import { icon } from './icons.js';
-import { contextMenu, closeMenus, alertError, confirmDlg } from './dialogs.js';
+import { contextMenu, closeMenus, alertError, alertInfo, confirmDlg } from './dialogs.js';
 import { Viewer } from './viewer.js';
 import { browse, useNativeDialogs } from './filebrowser.js';
-import { modelsDialog, preferencesDialog, shortcutsDialog, aboutDialog } from './tools.js';
+import { modelsDialog, preferencesDialog, shortcutsDialog, aboutDialog, updateDialog } from './tools.js';
 
-const DEFAULT_PREFS = { theme: 'system', panelWidth: 340, viewMode: 'slider', pixelated: true };
+const DEFAULT_PREFS = { theme: 'system', panelWidth: 340, viewMode: 'slider', pixelated: true, checkUpdates: true, skipVersion: '' };
 const DEFAULT_SETTINGS = {
   model: 'realesr-general-x4v3', scale: 4, format: 'auto', quality: 92, outputDir: '', nameTemplate: '{name}',
   existing: 'skip', tile: 0, device: 'auto', supir: {},
@@ -124,6 +124,31 @@ class App {
     window.addEventListener('beforeunload', () => this.saveStateSoon.flush());
     startHeartbeat();
     this.status('Ready.');
+    if (this.prefs.checkUpdates) setTimeout(() => this.checkUpdates(false), 3000);
+  }
+
+  // Asks whether a newer version is out: on start (the backend asks GitHub at most once a day) or from Help (always asks).
+  async checkUpdates(asked) {
+    let u;
+    try {
+      u = await get('/updates', asked ? { force: true } : undefined);
+    } catch (e) {
+      if (asked) alertError(e.message);
+      return;
+    }
+    this.update = u;
+    this.renderUpdate();
+    if (!asked) return;
+    if (u.error) alertError(u.error, 'Could not check for updates');
+    else if (u.newer) updateDialog(this, u);
+    else alertInfo(u.latest ? `ZawUpscale ${u.current} is the newest version.` : 'No versions have been released yet.', 'Check for updates');
+  }
+
+  renderUpdate() {
+    const u = this.update;
+    const show = !!(u?.newer && this.prefs.checkUpdates && u.latest !== this.prefs.skipVersion);
+    this.sbUpdate.hidden = !show;
+    if (show) this.sbUpdate.textContent = `Version ${u.latest} is out`;
   }
 
   applyPrefs() {
@@ -184,6 +209,7 @@ class App {
       ]],
       ['Help', () => [
         { label: 'Keyboard shortcuts', onClick: () => shortcutsDialog() },
+        { label: 'Check for updates…', onClick: () => this.checkUpdates(true) },
         { label: 'About ZawUpscale', icon: 'info', onClick: () => aboutDialog(this) },
       ]],
     ];
@@ -237,7 +263,8 @@ class App {
   buildStatusbar() {
     this.sbMsg = h('div', { class: 'sb-cell grow' });
     this.sbDevice = h('div', { class: 'sb-cell' });
-    document.getElementById('statusbar').append(this.sbMsg, this.sbDevice, h('div', { class: 'sb-cell' }, 'ZawUpscale ' + (this.version?.version ?? '')));
+    this.sbUpdate = h('button', { class: 'sb-cell sb-update', hidden: true, title: 'See what is new and download it', onclick: () => updateDialog(this, this.update) });
+    document.getElementById('statusbar').append(this.sbMsg, this.sbDevice, this.sbUpdate, h('div', { class: 'sb-cell' }, 'ZawUpscale ' + (this.version?.version ?? '')));
   }
 
   renderDevice() {

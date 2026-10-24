@@ -134,6 +134,9 @@ kbd { font-family: var(--mono); font-size: 11px; background: var(--surface); bor
 .splitter-v:hover { background: linear-gradient(to right, transparent 2px, var(--accent) 2px, var(--accent) 3px, transparent 3px); }
 #statusbar { display: flex; align-items: center; height: 26px; padding: 0 4px; background: var(--surface); border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; flex: none; }
 .sb-cell { padding: 0 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-update { border: 0; background: none; font: inherit; color: var(--accent); cursor: pointer; font-weight: 600; }
+.sb-update:hover { text-decoration: underline; }
+.sb-update[hidden] { display: none; }
 
 /* ---------- inputs & buttons ---------- */
 .inp {
@@ -357,6 +360,8 @@ details.adv > summary:hover { color: var(--ink); }
 .about { display: flex; gap: 18px; align-items: flex-start; }
 .about h2 { margin: 2px 0 6px; font-size: 18px; letter-spacing: -0.01em; }
 .about p { margin: 0 0 6px; line-height: 1.5; }
+.update p { margin: 0 0 8px; line-height: 1.5; }
+.update-notes { max-height: 260px; overflow: auto; margin: 4px 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); white-space: pre-wrap; font-size: 12.5px; line-height: 1.5; }
 .kbd-table { border-collapse: collapse; }
 .kbd-table td { padding: 5px 16px 5px 0; }
 

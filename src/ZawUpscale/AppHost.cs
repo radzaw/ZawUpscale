@@ -34,6 +34,7 @@ public static class AppHost
         builder.Services.AddSingleton<Jobs>();
         builder.Services.AddSingleton<Files>();
         builder.Services.AddSingleton<Heartbeat>();
+        builder.Services.AddSingleton<Updates>();
         builder.Services.AddSingleton<AppWindow>();
 
         var app = builder.Build();
