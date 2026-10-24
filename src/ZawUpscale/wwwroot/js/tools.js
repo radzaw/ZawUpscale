@@ -38,7 +38,7 @@ export function modelsDialog(app) {
       }
       return h('tr', null,
         h('td', null,
-          h('div', null, h('b', null, m.name), m.installed ? h('span', { class: 'tag ok' }, 'Installed') : null, m.kind === 'supir' ? h('span', { class: 'tag' }, 'SUPIR') : !m.builtIn ? h('span', { class: 'tag' }, 'Custom') : null),
+          h('div', null, h('b', null, m.name), m.installed ? h('span', { class: 'tag ok' }, 'Installed') : null, m.kind === 'supir' ? h('span', { class: 'tag' }, 'SUPIR') : m.kind === 'face' ? h('span', { class: 'tag' }, 'Faces') : !m.builtIn ? h('span', { class: 'tag' }, 'Custom') : null),
           h('div', { class: 'mdesc' }, m.description),
           d?.error ? h('div', { class: 'mdesc', style: { color: 'var(--err)' } }, 'Download failed: ' + d.error) : null,
           m.error ? h('div', { class: 'mdesc', style: { color: 'var(--err)' } }, m.error) : null,
@@ -63,7 +63,7 @@ export function modelsDialog(app) {
     width: 720,
     body: h('div', { class: 'form' },
       h('p', { class: 'hint', style: { margin: '0 0 6px' } },
-        'Models are downloaded once and kept in the models folder. You can also add your own: any ESRGAN-style super-resolution network exported to ONNX (RGB input [1, 3, H, W] in 0–1, float32 or float16). The scale is detected automatically. SUPIR models are folders made from the original weights by tools/supir/export_supir.py.'),
+        'Models are downloaded once and kept in the models folder. You can also add your own: any ESRGAN-style super-resolution network exported to ONNX (RGB input [1, 3, H, W] in 0–1, float32 or float16). The scale is detected automatically. SUPIR models are folders made from the original weights by tools/supir/export_supir.py. Face models (GFPGAN, CodeFormer) rebuild faces after upscaling; turn them on under Restore faces.'),
       h('table', { class: 'mtable' }, h('thead', null, h('tr', null, h('th', null, 'Model'), h('th', null, ''))), tbody)),
     buttons: [
       { label: 'Add model file…', align: 'left', onClick: async () => {

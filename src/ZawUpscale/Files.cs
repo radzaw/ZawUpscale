@@ -74,9 +74,9 @@ public sealed class Files(AppOptions opts)
     /// </summary>
     public static ScanResult Scan(IEnumerable<string> inputs, bool recursive, string? nameTemplate = null, IEnumerable<string>? modelIds = null)
     {
-        // Results folders ("realesr-general-x4v3_x4") found below an opened folder hold earlier results.
+        // Results folders ("realesr-general-x4v3_x4", "…_x4_faces") found below an opened folder hold earlier results.
         var resultsFolder = modelIds?.Any() == true
-            ? new Regex($"^(?:{string.Join('|', modelIds.Select(Regex.Escape))})_x[0-9]+(?:\\.[0-9]+)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+            ? new Regex($"^(?:{string.Join('|', modelIds.Select(Regex.Escape))})_x[0-9]+(?:\\.[0-9]+)?(?:_faces)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
             : null;
         var inResults = 0;
         var items = new List<JobItemRequest>();

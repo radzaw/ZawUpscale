@@ -210,6 +210,9 @@ textarea.inp { height: auto; padding: 6px 10px; resize: vertical; line-height: 1
 .mdl .err { color: var(--err); font-size: 12px; }
 .supir { margin-top: 10px; padding: 2px 10px 10px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 4px; }
 .supir details.adv { margin-top: 8px; }
+.faces { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
+.faces-body { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.faces-body .mdl { margin-top: 4px; }
 .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .grid3 .inp { width: 100%; }
 

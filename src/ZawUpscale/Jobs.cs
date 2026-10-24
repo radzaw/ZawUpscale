@@ -23,6 +23,10 @@ public sealed record UpscaleSettings
     public string Device { get; init; } = "auto";
     /// <summary>Options for SUPIR models (ignored by the others).</summary>
     public SupirSettings? Supir { get; init; }
+    /// <summary>The face restoration model to run after upscaling ("gfpgan-v1.4", "codeformer"), or empty for none. Not used with SUPIR.</summary>
+    public string? Faces { get; init; }
+    /// <summary>How much of the restored faces to blend in, 0–1.</summary>
+    public double FaceStrength { get; init; } = 0.8;
 }
 
 public sealed record JobItemRequest(string Path, string? Rel = null);
@@ -42,6 +46,10 @@ public sealed class JobItem
     public int? InHeight { get; set; }
     public int? OutWidth { get; set; }
     public int? OutHeight { get; set; }
+    /// <summary>Faces restored, when face restoration is on.</summary>
+    public int? Faces { get; set; }
+    /// <summary>While running: null while upscaling, "faces" while restoring faces.</summary>
+    public string? Step { get; set; }
     public JobItem Copy() => (JobItem)MemberwiseClone();
 }
 
@@ -98,7 +106,9 @@ public sealed class Jobs : IDisposable
     {
         var s = Validate(r.Settings);
         if (r.Items is not { Count: > 0 }) throw new ApiException("There are no images to upscale.");
+        if (ModelStore.IsFaceModel(s.Model)) throw new ApiException($"{s.Model} restores faces and can't upscale on its own: use it for face restoration (Restore faces, or --faces) with an upscaling model.");
         if (!models.IsInstalled(s.Model)) throw new ApiException("The model isn't installed. Download it in Models first.");
+        if (s.Faces != null && !models.IsInstalled(s.Faces)) throw new ApiException("The face restoration model isn't installed. Download it in Models first.");
         var job = new Job
         {
             Id = Guid.NewGuid().ToString("n")[..12],
@@ -128,14 +138,25 @@ public sealed class Jobs : IDisposable
         if (s.Existing is not ("skip" or "overwrite" or "rename")) throw new ApiException($"Unknown option \"{s.Existing}\" for existing files.");
         if (s.Tile is < 0 or > 4096) throw new ApiException("The tile size must be between 32 and 4096 pixels (or automatic).");
         SupirPackage.Validate(s.Supir);
+        var faces = string.IsNullOrWhiteSpace(s.Faces) || s.Faces == "none" ? null : s.Faces.Trim();
+        if (faces != null && !ModelStore.IsFaceModel(faces))
+            throw new ApiException($"Unknown face restoration model \"{faces}\"; use one of {string.Join(", ", ModelStore.Catalog.Where(c => c.Kind == "face").Select(c => c.Id))}.");
+        if (s.FaceStrength is < 0 or > 1 || double.IsNaN(s.FaceStrength)) throw new ApiException("The face restoration strength must be between 0 and 1.");
         var dir = string.IsNullOrWhiteSpace(s.OutputDir) ? null : Path.GetFullPath(s.OutputDir.Trim().Trim('"'));
-        return s with { Format = format, NameTemplate = template, OutputDir = dir, Quality = Math.Clamp(s.Quality, 1, 100), Device = string.IsNullOrEmpty(s.Device) ? "auto" : s.Device };
+        return s with
+        {
+            Format = format, NameTemplate = template, OutputDir = dir, Quality = Math.Clamp(s.Quality, 1, 100), Device = string.IsNullOrEmpty(s.Device) ? "auto" : s.Device,
+            Faces = faces,
+        };
     }
 
     public static string FormatScale(double scale) => scale.ToString("0.##", CultureInfo.InvariantCulture);
 
-    /// <summary>The subfolder results go in when no output folder is chosen, e.g. "realesr-general-x4v3_x4".</summary>
-    public static string ResultsFolder(string model, double scale) => $"{model}_x{FormatScale(scale)}";
+    /// <summary>
+    /// The subfolder results go in when no output folder is chosen, e.g. "realesr-general-x4v3_x4", or
+    /// "realesr-general-x4v3_x4_faces" with face restoration, so turning it on doesn't skip the earlier results.
+    /// </summary>
+    public static string ResultsFolder(string model, double scale, bool faces = false) => $"{model}_x{FormatScale(scale)}{(faces ? "_faces" : "")}";
 
     /// <summary>Output format for an input file: the chosen one, or the input's own (PNG for formats we can't write).</summary>
     public static string FormatFor(string input, string format)
@@ -165,7 +186,7 @@ public sealed class Jobs : IDisposable
             // A subfolder of the folder that was opened, named after the model and scale.
             var suffix = relDir == "" ? "" : Path.DirectorySeparatorChar + relDir;
             var root = suffix != "" && inputDir.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) ? inputDir[..^suffix.Length] : inputDir;
-            dir = Path.Combine(root, ResultsFolder(s.Model, s.Scale), root == inputDir ? "" : relDir);
+            dir = Path.Combine(root, ResultsFolder(s.Model, s.Scale, FacesOn(s)), root == inputDir ? "" : relDir);
         }
         var name = s.NameTemplate
             .Replace("{name}", Path.GetFileNameWithoutExtension(input), StringComparison.OrdinalIgnoreCase)
@@ -174,6 +195,9 @@ public sealed class Jobs : IDisposable
         var ext = FormatFor(input, s.Format) switch { "jpg" => ".jpg", "webp" => ".webp", _ => ".png" };
         return Path.Combine(dir, name + ext);
     }
+
+    /// <summary>Whether faces are restored: when chosen, except with SUPIR, which rebuilds faces itself.</summary>
+    internal bool FacesOn(UpscaleSettings s) => s.Faces != null && !SupirPackage.IsPackage(models.PathOf(s.Model));
 
     static bool IsUnder(string path, string dir) =>
         path.StartsWith(Path.TrimEndingDirectorySeparator(dir) + Path.DirectorySeparatorChar, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
@@ -266,6 +290,9 @@ public sealed class Jobs : IDisposable
         var s = job.Settings;
         var ct = job.Cts.Token;
         var modelPath = models.PathOf(s.Model);
+        var faces = FacesOn(s) ? (Restorer: models.PathOf(s.Faces!), Detector: models.PathOf(ModelStore.FaceDetectorId)) : default;
+        // Progress: the upscale, then the faces (a few network runs, quick next to the upscale).
+        var share = faces.Restorer != null ? 0.85 : 1;
         foreach (var item in job.Items)
         {
             if (ct.IsCancellationRequested) return;
@@ -288,10 +315,17 @@ public sealed class Jobs : IDisposable
 
                 var src = ImageIO.Load(item.Input);
                 lock (gate) { item.InWidth = src.Width; item.InHeight = src.Height; }
-                var progress = new Progress(p => { lock (gate) item.Progress = p; });
+                var progress = new Progress(p => { lock (gate) item.Progress = p * share; });
                 var result = engine.Upscale(src, modelPath, s.Device, s.Scale, s.Tile, progress,
                     notice => { lock (gate) job.Notice = notice; }, ct, s.Supir);
                 lock (gate) job.Device = engine.ActiveDevice;
+                if (faces.Restorer != null)
+                {
+                    lock (gate) item.Step = "faces";
+                    var n = engine.RestoreFaces(src, result, faces.Restorer, faces.Detector, s.Device, s.FaceStrength,
+                        new Progress(p => { lock (gate) item.Progress = share + (1 - share) * p; }), ct);
+                    lock (gate) { item.Faces = n; item.Step = null; }
+                }
                 ImageIO.Save(result, output, FormatFor(item.Input, s.Format), s.Quality);
                 lock (gate)
                 {

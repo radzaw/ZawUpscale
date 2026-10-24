@@ -3,10 +3,14 @@ using System.Security.Cryptography;
 
 namespace ZawUpscale;
 
-/// <summary>A model ZawUpscale knows how to download.</summary>
-public sealed record CatalogModel(string Id, string Name, string Description, string Url, long Size, string Sha256, string License, string Source);
+/// <summary>
+/// A model ZawUpscale knows how to download. Kind is "upscaler", "face" (face restoration) or "detector" (a face
+/// detector, not listed: it's downloaded with the face models, which <see cref="Requires"/> it).
+/// </summary>
+public sealed record CatalogModel(string Id, string Name, string Description, string Url, long Size, string Sha256, string License, string Source,
+    string Kind = "upscaler", string[]? Requires = null);
 
-/// <summary>A model in the list. Kind is "upscaler" (one ONNX file) or "supir" (a SUPIR folder, with its default settings).</summary>
+/// <summary>A model in the list. Kind is "upscaler" (one ONNX file), "face" (face restoration) or "supir" (a SUPIR folder, with its default settings).</summary>
 public sealed record ModelInfo(
     string Id, string Name, string Description, bool BuiltIn, bool Installed, long Size, string? License, string? Source,
     DownloadState? Download, string Kind = "upscaler", SupirOptions? Supir = null, string? Error = null);
@@ -36,7 +40,27 @@ public sealed class ModelStore
             "https://huggingface.co/skillsafe-ai/realesrgan-x4plus-anime-6b/resolve/main/model.onnx",
             17_939_975, "9a029dae374b2cd4c3eb2dbbed857e22e6d785687c767aa12828e7356b9fb378", "BSD-3-Clause",
             "https://github.com/xinntao/Real-ESRGAN"),
+        new("gfpgan-v1.4", "GFPGAN 1.4",
+            "Rebuilds blurry, small or damaged faces with natural detail. Works on photos; it can make faces look smoother than they were.",
+            "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx",
+            340_299_087, "accc4757b26bdb89b32b4d3500d4f79c9dff97c1dd7c7104bf9dcb95e3311385", "Apache-2.0",
+            "https://github.com/TencentARC/GFPGAN", "face", [FaceDetectorId]),
+        new("codeformer", "CodeFormer",
+            "Restores even badly degraded faces and keeps them closer to the person's likeness. For non-commercial use only.",
+            "https://huggingface.co/facefusion/models-3.0.0/resolve/main/codeformer.onnx",
+            376_951_650, "21710e7ab61c82683576c428e9c1b6fe1ed419586b7b39e394c3449c294b550f", "S-Lab License 1.0 (non-commercial)",
+            "https://github.com/sczhou/CodeFormer", "face", [FaceDetectorId]),
+        new(FaceDetectorId, "YuNet face detector",
+            "Finds faces and their landmarks for face restoration.",
+            "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
+            232_589, "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4", "MIT",
+            "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet", "detector"),
     ];
+
+    public const string FaceDetectorId = "yunet-face-2023mar";
+
+    /// <summary>True for the face restoration models of the catalog.</summary>
+    public static bool IsFaceModel(string? id) => Catalog.Any(c => c.Id == id && c.Kind == "face");
 
     public string Dir { get; }
     readonly ConcurrentDictionary<string, DownloadState> downloads = new();
@@ -61,20 +85,22 @@ public sealed class ModelStore
         return SupirPackage.IsPackage(folder) ? folder : Path.Combine(Dir, id + ".onnx");
     }
 
+    /// <summary>True if the model and the models it needs (a face model's detector) are all there.</summary>
     public bool IsInstalled(string id)
     {
         var path = PathOf(id);
-        return File.Exists(path) || SupirPackage.IsPackage(path);
+        if (SupirPackage.IsPackage(path)) return true;
+        var needs = Catalog.FirstOrDefault(c => c.Id == id)?.Requires ?? [];
+        return File.Exists(path) && needs.All(r => File.Exists(PathOf(r)));
     }
 
     public List<ModelInfo> List()
     {
         var list = new List<ModelInfo>();
-        foreach (var c in Catalog)
+        foreach (var c in Catalog.Where(c => c.Kind != "detector"))
         {
-            var path = Path.Combine(Dir, c.Id + ".onnx");
             downloads.TryGetValue(c.Id, out var d);
-            list.Add(new ModelInfo(c.Id, c.Name, c.Description, true, File.Exists(path), c.Size, c.License, c.Source, d));
+            list.Add(new ModelInfo(c.Id, c.Name, c.Description, true, IsInstalled(c.Id), c.Size, c.License, c.Source, d, c.Kind));
         }
         foreach (var f in Directory.EnumerateFiles(Dir, "*.onnx").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
         {
@@ -111,18 +137,27 @@ public sealed class ModelStore
         if (running.ContainsKey(id)) return;
         var cts = new CancellationTokenSource();
         if (!running.TryAdd(id, cts)) return;
-        downloads[id] = new DownloadState(0, c.Size, null, false);
+        // The models it needs first (the face detector), then the model itself, as one download.
+        var parts = (c.Requires ?? []).Select(r => Catalog.First(m => m.Id == r)).Append(c)
+            .Where(m => m == c || !File.Exists(PathOf(m.Id))).ToList();
+        var total = parts.Sum(m => m.Size);
+        downloads[id] = new DownloadState(0, total, null, false);
         _ = Task.Run(async () =>
         {
             try
             {
-                await Download(c, cts.Token);
-                downloads[id] = new DownloadState(c.Size, c.Size, null, true);
+                long offset = 0;
+                foreach (var part in parts)
+                {
+                    await Download(part, id, offset, total, cts.Token);
+                    offset += part.Size;
+                }
+                downloads[id] = new DownloadState(total, total, null, true);
             }
             catch (Exception ex)
             {
                 log.LogWarning("Download of {Model} failed: {Message}", id, ex.Message);
-                downloads[id] = new DownloadState(0, c.Size, ex is OperationCanceledException ? "Cancelled." : ex.Message, true);
+                downloads[id] = new DownloadState(0, total, ex is OperationCanceledException ? "Cancelled." : ex.Message, true);
             }
             finally
             {
@@ -143,7 +178,8 @@ public sealed class ModelStore
         if (!running.ContainsKey(id)) downloads.TryRemove(id, out _);
     }
 
-    async Task Download(CatalogModel c, CancellationToken ct)
+    /// <summary>Downloads one file, reporting progress as part of the download <paramref name="progressId"/> (bytes before it: <paramref name="offset"/>).</summary>
+    async Task Download(CatalogModel c, string progressId, long offset, long total, CancellationToken ct)
     {
         var target = Path.Combine(Dir, c.Id + ".onnx");
         var part = target + ".part";
@@ -151,7 +187,7 @@ public sealed class ModelStore
         {
             using var res = await http.GetAsync(c.Url, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!res.IsSuccessStatusCode) throw new ApiException($"The server answered {(int)res.StatusCode} {res.ReasonPhrase}.");
-            var total = res.Content.Headers.ContentLength ?? c.Size;
+            if (c.Id == progressId) total = offset + (res.Content.Headers.ContentLength ?? c.Size);
             await using (var src = await res.Content.ReadAsStreamAsync(ct))
             await using (var dst = File.Create(part))
             {
@@ -164,7 +200,7 @@ public sealed class ModelStore
                     await dst.WriteAsync(buf.AsMemory(0, n), ct);
                     sha.AppendData(buf, 0, n);
                     got += n;
-                    downloads[c.Id] = new DownloadState(got, total, null, false);
+                    downloads[progressId] = new DownloadState(offset + got, total, null, false);
                 }
                 var hash = Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant();
                 if (hash != c.Sha256) throw new ApiException("The downloaded file is damaged or has changed (SHA-256 mismatch). Try again later.");

@@ -56,7 +56,7 @@ public sealed class ApiTests : IAsyncLifetime
         var sys = (await app.GetAsync("/system")).Expect();
         Assert.Contains(sys.GetProperty("devices").EnumerateArray(), d => d.GetProperty("id").GetString() == "cpu");
         var models = (await app.GetAsync("/models")).Expect().EnumerateArray().ToList();
-        Assert.Equal(ModelStore.Catalog.Length + 1, models.Count);
+        Assert.Equal(ModelStore.Catalog.Count(c => c.Kind != "detector") + 1, models.Count); // the face detector comes with the face models
         var custom = models.Single(m => m.GetProperty("id").GetString() == "test-x2");
         Assert.True(custom.GetProperty("installed").GetBoolean());
         Assert.False(custom.GetProperty("builtIn").GetBoolean());

@@ -134,6 +134,7 @@ public sealed record DeviceInfo(string Id, string Name, string? Detail);
 
 /// <summary>
 /// Owns the loaded network (one at a time: they can be large and live in GPU memory) and runs upscales.
+/// Face restoration models are kept in a second slot beside it, so a batch doesn't reload either per image.
 /// Device ids: "auto" (first GPU, falling back to the CPU), "gpu:N" (DirectML adapter N) and "cpu".
 /// </summary>
 public sealed class Engine(ILogger<Engine> log) : IDisposable
@@ -141,6 +142,8 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
     readonly Lock gate = new();
     IEngineModel? loaded;
     string? loadedKey;
+    FaceModels? faces;
+    string? facesKey;
     string? lastGpuError;
 
 #if DIRECTML
@@ -189,6 +192,24 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
         }
     }
 
+    /// <summary>Loads a face restoration network with the face detector.</summary>
+    public FaceModels LoadFaces(string restorerPath, string detectorPath, string device)
+    {
+        foreach (var p in new[] { restorerPath, detectorPath })
+            if (!File.Exists(p)) throw new ApiException($"Model file not found: {p}");
+        var key = restorerPath + "|" + device + "|" + File.GetLastWriteTimeUtc(restorerPath).Ticks + "|" + File.GetLastWriteTimeUtc(detectorPath).Ticks;
+        lock (gate)
+        {
+            if (faces != null && facesKey == key) return faces;
+            faces?.Dispose();
+            faces = null;
+            faces = OnDevice(device, (so, name) => new FaceModels(restorerPath, detectorPath, so, name));
+            facesKey = key;
+            return faces;
+        }
+    }
+
+    /// <summary>Lets go of all models: the upscaler and the face models.</summary>
     public void Unload()
     {
         lock (gate)
@@ -196,12 +217,21 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             loaded?.Dispose();
             loaded = null;
             loadedKey = null;
+            faces?.Dispose();
+            faces = null;
+            facesKey = null;
         }
     }
 
     OnnxSrModel Create(string path, string device)
     {
         if (!File.Exists(path)) throw new ApiException($"Model file not found: {path}");
+        return OnDevice(device, (so, name) => new OnnxSrModel(path, so, name));
+    }
+
+    /// <summary>Creates a model on the chosen GPU, or the CPU; "auto" falls back to the CPU when the GPU fails.</summary>
+    T OnDevice<T>(string device, Func<SessionOptions, string, T> create)
+    {
         if (device != "cpu" && HasGpu)
         {
             var gpus = Gpu.Adapters();
@@ -210,7 +240,7 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             try
             {
                 var so = GpuOptions(index);
-                var m = new OnnxSrModel(path, so, $"{name} (DirectML)");
+                var m = create(so, $"{name} (DirectML)");
                 lastGpuError = null;
                 return m;
             }
@@ -222,7 +252,7 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             }
         }
         var cpu = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
-        return new OnnxSrModel(path, cpu, "CPU");
+        return create(cpu, "CPU");
     }
 
     SupirModel CreateSupir(string dir, string device)
@@ -314,6 +344,18 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
                 throw new ApiException($"Not enough GPU memory for SUPIR (it needs about 12 GB): {ex.Message}");
             }
         }
+    }
+
+    /// <summary>
+    /// Restores the faces of <paramref name="original"/> in its upscaled version <paramref name="upscaled"/> (changed in
+    /// place), with <paramref name="strength"/> from 0 (unchanged) to 1. Returns the number of faces.
+    /// </summary>
+    public int RestoreFaces(RgbaImage original, RgbaImage upscaled, string restorerPath, string detectorPath, string device, double strength,
+        IProgress<double>? progress, CancellationToken ct)
+    {
+        var models = LoadFaces(restorerPath, detectorPath, device);
+        using var reg = models.BindCancellation(ct);
+        return models.Enhance(original, upscaled, strength, progress, ct);
     }
 
     public void Dispose() => Unload();

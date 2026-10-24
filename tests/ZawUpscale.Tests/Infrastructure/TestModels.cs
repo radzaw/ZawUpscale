@@ -40,6 +40,23 @@ public static class TestModels
         return new Proto().Int(1, 8).Bytes(8, opset).Bytes(7, graph.ToArray()).ToArray();
     }
 
+    /// <summary>
+    /// A stand-in face restorer with GFPGAN's interface ([1, 3, 512, 512] in [−1, 1]) that negates its input, which
+    /// inverts the colors; with <paramref name="weight"/>, it also takes CodeFormer's scalar double fidelity input.
+    /// </summary>
+    public static byte[] FaceRestorer(bool weight = false, int size = 512)
+    {
+        const int Float = 1, Double = 11;
+        object[] dims = [1, 3, size, size];
+        if (!weight)
+            return Graph([Node("Neg", ["input"], ["output"])], [], [ValueInfo("input", Float, dims)], [ValueInfo("output", Float, dims)]);
+        // output = −input + 0 · weight, so the weight is a real input that has to be fed.
+        return Graph(
+            [Node("Neg", ["input"], ["neg"]), Node("Cast", ["weight"], ["w32"], Attr("to", Float)), Node("Mul", ["w32", "zero"], ["w0"]), Node("Add", ["neg", "w0"], ["output"])],
+            [Tensor("zero", [], [0f])],
+            [ValueInfo("input", Float, dims), ValueInfo("weight", Double, [])], [ValueInfo("output", Float, dims)]);
+    }
+
     public static string Write(string dir, string id, byte[] model)
     {
         Directory.CreateDirectory(dir);

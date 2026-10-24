@@ -22,6 +22,8 @@ public static class Cli
             --overwrite           Replace existing outputs (default: skip them)
             --tile <n>            Tile size in pixels (default: automatic)
             --device <id>         auto, cpu or gpu:N (default auto)
+            --faces <id>          Restore faces after upscaling: gfpgan-v1.4 or codeformer
+            --face-strength <n>   How much of the restored faces to blend in, 0-1 (default 0.8)
           SUPIR models (see tools/supir/README.md):
             --prompt <text>       What the image shows, e.g. "a red fox kit in the grass"
             --negative <text>     Negative prompt (default: the model's)
@@ -125,6 +127,8 @@ public static class Cli
                 case "--overwrite": s = s with { Existing = "overwrite" }; break;
                 case "--tile": s = s with { Tile = int.Parse(Next()) }; break;
                 case "--device": s = s with { Device = Next() }; break;
+                case "--faces": s = s with { Faces = Next() }; break;
+                case "--face-strength": s = s with { FaceStrength = Number(Next()) }; break;
                 case "--prompt": supir = supir with { Prompt = Next() }; break;
                 case "--negative": supir = supir with { NegativePrompt = Next() }; break;
                 case "--steps": supir = supir with { Steps = int.Parse(Next()) }; break;
@@ -163,7 +167,7 @@ public static class Cli
                 Console.Write("\r" + new string(' ', 70) + "\r");
                 Console.WriteLine(it.Status switch
                 {
-                    "done" => $"[{it.Index + 1}/{job.Items.Count}] {it.Input} -> {it.Output} ({it.InWidth}×{it.InHeight} → {it.OutWidth}×{it.OutHeight}, {it.Ms / 1000.0:0.0} s)",
+                    "done" => $"[{it.Index + 1}/{job.Items.Count}] {it.Input} -> {it.Output} ({it.InWidth}×{it.InHeight} → {it.OutWidth}×{it.OutHeight}{(it.Faces is { } f ? $", {f} face{(f == 1 ? "" : "s")}" : "")}, {it.Ms / 1000.0:0.0} s)",
                     "skipped" => $"[{it.Index + 1}/{job.Items.Count}] {it.Input}: skipped, {it.Output} exists",
                     _ => $"[{it.Index + 1}/{job.Items.Count}] {it.Input}: {it.Status}{(it.Error != null ? " - " + it.Error : "")}",
                 });

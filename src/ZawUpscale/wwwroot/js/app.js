@@ -11,6 +11,7 @@ const DEFAULT_PREFS = { theme: 'system', panelWidth: 340, viewMode: 'slider', pi
 const DEFAULT_SETTINGS = {
   model: 'realesr-general-x4v3', scale: 4, format: 'auto', quality: 92, outputDir: '', nameTemplate: '{name}',
   existing: 'skip', tile: 0, device: 'auto', supir: {},
+  faces: '', faceModel: 'gfpgan-v1.4', faceStrength: 0.8, // faces: the face model in use, or '' (off); faceModel: the last one chosen
 };
 // Running in the native window (Photino injects window.external.sendMessage) rather than a browser.
 const NATIVE = typeof window.external?.sendMessage === 'function';
@@ -24,6 +25,8 @@ const fmtScale = s => String(Number(Number(s).toFixed(2)));
 const imageUrl = (path, v) => urlWithToken('/fs/image', { path, v });
 const thumbUrl = (path, size, v) => urlWithToken('/fs/thumb', { path, size, v });
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+// Models that upscale (face restoration models only run after one).
+const isUpscaler = m => m.kind !== 'face';
 
 function formatFor(path, format) {
   if (format !== 'auto') return format;
@@ -72,8 +75,8 @@ class App {
     this.buildLayout();
     this.setupDrop();
     this.applyPrefs();
-    if (!this.models.some(m => m.id === this.settings.model && m.installed)) {
-      const first = this.models.find(m => m.installed);
+    if (!this.models.some(m => m.id === this.settings.model && m.installed && isUpscaler(m))) {
+      const first = this.models.find(m => m.installed && isUpscaler(m));
       if (first) this.settings.model = first.id;
     }
     this.renderAll();
@@ -273,20 +276,23 @@ class App {
     this.secSource.replaceChildren(this.title(1, s?.kind === 'batch' ? 'Images' : 'Image'), box);
   }
 
+  // The download button of a model that isn't installed, or its progress while it downloads.
+  modelDownload(m) {
+    const d = m.download;
+    if (d && !d.done) {
+      const f = d.total ? d.received / d.total : 0;
+      return h('div', { class: 'mdl' }, h('div', { class: 'bar' }, h('i', { style: { width: f * 100 + '%' } })), h('span', { class: 'muted num', style: { fontSize: '12px' } }, `${Math.round(f * 100)}%`));
+    }
+    return h('div', { class: 'mdl' },
+      h('button', { class: 'btn small', html: icon('download') + `<span>Download · ${fmtBytes(m.size)}</span>`, onclick: e => { e.stopPropagation(); e.preventDefault(); this.downloadModel(m.id); } }),
+      d?.error ? h('span', { class: 'err', title: d.error }, 'Failed') : null);
+  }
+
   renderModels() {
     const list = this.models;
-    const cards = list.filter(m => m.builtIn || m.installed).map(m => {
+    const cards = list.filter(m => isUpscaler(m) && (m.builtIn || m.installed)).map(m => {
       const on = m.installed && this.settings.model === m.id;
-      const d = m.download;
-      const busy = d && !d.done;
-      let extra = null;
-      if (!m.installed) {
-        extra = busy
-          ? h('div', { class: 'mdl' }, h('div', { class: 'bar' }, h('i', { style: { width: (d.total ? d.received / d.total : 0) * 100 + '%' } })), h('span', { class: 'muted num', style: { fontSize: '12px' } }, `${Math.round((d.total ? d.received / d.total : 0) * 100)}%`))
-          : h('div', { class: 'mdl' },
-            h('button', { class: 'btn small', html: icon('download') + `<span>Download · ${fmtBytes(m.size)}</span>`, onclick: e => { e.stopPropagation(); this.downloadModel(m.id); } }),
-            d?.error ? h('span', { class: 'err', title: d.error }, 'Failed') : null);
-      }
+      const extra = m.installed ? null : this.modelDownload(m);
       const card = h('label', { class: 'mcard' + (on ? ' on' : '') + (m.installed ? '' : ' missing') },
         h('input', { type: 'radio', name: 'model', checked: on, disabled: !m.installed || this.running(), onchange: () => this.selectModel(m.id) }),
         h('div', { class: 'mbody' }, h('div', { class: 'mname' }, m.name, m.kind === 'supir' ? h('span', { class: 'tag' }, 'SUPIR') : null),
@@ -297,7 +303,43 @@ class App {
     this.secModel.replaceChildren(
       this.title(2, 'AI model', h('button', { class: 'linkbtn', onclick: () => modelsDialog(this) }, 'Manage…')),
       h('div', { class: 'models' }, cards),
-      sel?.kind === 'supir' ? this.supirOptions(sel) : null);
+      sel?.kind === 'supir' ? this.supirOptions(sel) : this.facesOptions());
+  }
+
+  // Face restoration after upscaling (not with SUPIR, which rebuilds faces itself).
+  facesOptions() {
+    const s = this.settings;
+    const list = this.models.filter(m => m.kind === 'face');
+    if (!list.length) return null;
+    const chosen = list.find(m => m.id === (s.faces || s.faceModel)) || list[0];
+    const disabled = this.running();
+    const toggle = h('input', { type: 'checkbox', checked: !!s.faces, disabled, onchange: e => {
+      s.faces = e.target.checked ? chosen.id : '';
+      s.faceModel = chosen.id;
+      this.settingsChanged();
+    } });
+    const head = h('label', { class: 'chk', title: 'Finds the faces in each image and rebuilds them after upscaling' }, toggle, 'Restore faces');
+    if (!s.faces) return h('div', { class: 'faces' }, head);
+
+    const sel = h('select', { class: 'inp', disabled }, list.map(m => h('option', { value: m.id, selected: m.id === chosen.id }, m.name)));
+    sel.addEventListener('change', () => { s.faces = s.faceModel = sel.value; this.settingsChanged(); });
+    const pct = v => Math.round(v * 100) + '%';
+    const val = h('span', { class: 'val' }, pct(s.faceStrength));
+    const range = h('input', { type: 'range', min: 0.1, max: 1, step: 0.05, value: s.faceStrength, disabled });
+    range.addEventListener('input', () => { s.faceStrength = Number(range.value); val.textContent = pct(s.faceStrength); this.saveStateSoon(); });
+    return h('div', { class: 'faces' }, head,
+      h('div', { class: 'faces-body' },
+        h('div', { class: 'field' }, h('label', null, 'Model'), sel),
+        h('div', { class: 'field', title: 'How much of the restored faces to blend over the upscaled image. Lower keeps more of the original look.' },
+          h('label', null, 'Strength'), h('div', { class: 'quality' }, range, val)),
+        h('div', { class: 'mdesc' }, chosen.description),
+        chosen.installed ? null : this.modelDownload(chosen)));
+  }
+
+  // Whether this upscale restores faces: chosen, and the model isn't SUPIR.
+  facesOn() {
+    const sel = this.models.find(m => m.id === this.settings.model);
+    return !!this.settings.faces && sel?.kind !== 'supir';
   }
 
   // SUPIR's options. Empty fields use the model's defaults, shown as placeholders. Typing doesn't re-render, so focus stays.
@@ -408,7 +450,7 @@ class App {
       this.namePreview.replaceChildren('{name}, {scale} and {model} are filled in.');
     }
     const inbox = this.source?.uploaded;
-    const sub = `${s.model}_x${fmtScale(s.scale)}`;
+    const sub = `${s.model}_x${fmtScale(s.scale)}${this.facesOn() ? '_faces' : ''}`;
     this.outDir.placeholder = `Subfolder ${sub}`;
     this.outHint.textContent = s.outputDir ? '' : inbox ? `Dropped images are saved in ${this.system.defaultOutputDir}` : `Saved in a ${sub} folder inside the opened folder`;
     this.outHint.style.display = this.outHint.textContent ? '' : 'none';
@@ -492,7 +534,8 @@ class App {
     const back = this.source.kind === 'batch'
       ? h('button', { class: 'tbtn', title: 'Back to all images', onclick: () => { this.focus = null; this.renderStage(); }, html: icon('back') + '<span>All images</span>' })
       : null;
-    const meta = res?.status === 'done' ? `${fmtMs(res.ms)} · ${baseName(res.output)}` : res?.status === 'failed' ? 'Failed' : res?.status === 'skipped' ? 'Skipped: the result already exists' : '';
+    const faces = res?.faces != null ? ` · ${res.faces ? plural(res.faces, 'face') + ' restored' : 'no faces found'}` : '';
+    const meta = res?.status === 'done' ? `${fmtMs(res.ms)}${faces} · ${baseName(res.output)}` : res?.status === 'failed' ? 'Failed' : res?.status === 'skipped' ? 'Skipped: the result already exists' : '';
     this.stageBar.replaceChildren(...[
       back, back ? h('span', { class: 'sep' }) : null,
       h('div', { class: 'stage-title' }, h('b', { title: path }, baseName(path)), h('span', null, meta)),
@@ -517,7 +560,7 @@ class App {
     const it = this.running() ? this.job.items.find(i => i.input === path) : null;
     if (it && (it.status === 'running' || it.status === 'queued')) {
       this.viewer.setBusy({
-        text: it.status === 'queued' ? 'Waiting…' : it.progress > 0 ? 'Upscaling…' : 'Loading the model…',
+        text: it.status === 'queued' ? 'Waiting…' : it.step === 'faces' ? 'Restoring faces…' : it.progress > 0 ? 'Upscaling…' : 'Loading the model…',
         detail: it.status === 'running' ? Math.floor(it.progress * 100) + '%' : '',
         pct: it.status === 'running' && it.progress > 0 ? it.progress : null,
       });
@@ -526,8 +569,8 @@ class App {
 
   renderEmpty() {
     this.stageBar.replaceChildren(h('div', { class: 'stage-title' }, h('b', null, 'No image'), h('span', null, 'Open or drop images to begin')));
-    const anyModel = this.models.some(m => m.installed);
-    const general = this.models.find(m => m.builtIn && !m.installed);
+    const anyModel = this.models.some(m => m.installed && isUpscaler(m));
+    const general = this.models.find(m => m.builtIn && !m.installed && isUpscaler(m));
     const dl = general?.download && !general.download.done;
     this.stageBody.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'drop-card' },
       h('div', { class: 'big', html: icon('sparkle') }),
@@ -581,7 +624,7 @@ class App {
       c.shown = r.output;
       c.img.src = thumbUrl(r.output, 320, r.finished);
       c.meta.className = 'card-meta';
-      c.meta.textContent = `${r.outWidth} × ${r.outHeight} · ${fmtMs(r.ms)}`;
+      c.meta.textContent = `${r.outWidth} × ${r.outHeight} · ${fmtMs(r.ms)}${r.faces ? ` · ${plural(r.faces, 'face')}` : ''}`;
     } else if (st === 'failed') {
       c.meta.className = 'card-meta err';
       c.meta.textContent = r.error || 'Failed';
@@ -750,10 +793,11 @@ class App {
   setModels(list) {
     const before = new Set(this.models.filter(m => m.installed).map(m => m.id));
     this.models = list;
+    const ready = list.filter(m => m.installed && isUpscaler(m));
     // A model that just finished downloading becomes the choice if none was usable.
-    const fresh = list.find(m => m.installed && !before.has(m.id));
-    if (fresh && !list.some(m => m.installed && m.id === this.settings.model && before.has(m.id))) this.settings.model = fresh.id;
-    if (!list.some(m => m.installed && m.id === this.settings.model)) this.settings.model = list.find(m => m.installed)?.id || this.settings.model;
+    const fresh = ready.find(m => !before.has(m.id));
+    if (fresh && !ready.some(m => m.id === this.settings.model && before.has(m.id))) this.settings.model = fresh.id;
+    if (!ready.some(m => m.id === this.settings.model)) this.settings.model = ready[0]?.id || this.settings.model;
     this.renderModels();
     this.renderFoot();
     if (!this.source) this.renderEmpty();
@@ -792,6 +836,11 @@ class App {
     if (this.running() || !this.source) return;
     const model = this.models.find(m => m.id === this.settings.model && m.installed);
     if (!model) { modelsDialog(this); return; }
+    const faceModel = this.facesOn() ? this.models.find(m => m.id === this.settings.faces) : null;
+    if (faceModel && !faceModel.installed) {
+      alertError(`Download ${faceModel.name} first (under Restore faces), or turn face restoration off.`);
+      return;
+    }
     const items = this.source.kind === 'image' ? [{ path: this.source.path }] : this.source.items;
     if (this.settings.existing === 'overwrite' && items.length > 20
       && !await confirmDlg(`Upscale ${items.length} images and overwrite results that already exist?`, { title: 'Upscale', ok: 'Upscale' })) return;
@@ -802,7 +851,7 @@ class App {
       if (this.source.kind === 'image' && settings.existing === 'skip') settings.existing = 'overwrite';
       this.job = await post('/jobs', { items, settings });
       if (this.source.kind === 'batch' && this.focus) this.focus = null;
-      this.status(`Upscaling with ${model.name}…`);
+      this.status(`Upscaling with ${model.name}${faceModel ? ` and restoring faces with ${faceModel.name}` : ''}…`);
       this.renderAll();
       this.poll();
     } catch (e) {

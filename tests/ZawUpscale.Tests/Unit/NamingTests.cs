@@ -103,13 +103,13 @@ public sealed class NamingTests : IDisposable
     public void Recursive_scans_leave_out_results_folders()
     {
         var dir = Path.Combine(root, "tree");
-        foreach (var f in new[] { "a.png", Path.Combine("model-1_x4", "a_x4.png"), Path.Combine("sub", "model-1_x2.5", "b_x2.5.png"), Path.Combine("sub", "b.png"), Path.Combine("other_x4", "c.png") })
+        foreach (var f in new[] { "a.png", Path.Combine("model-1_x4", "a_x4.png"), Path.Combine("sub", "model-1_x2.5", "b_x2.5.png"), Path.Combine("sub", "b.png"), Path.Combine("other_x4", "c.png"), Path.Combine("model-1_x4_faces", "a.png") })
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(dir, f))!);
             File.WriteAllBytes(Path.Combine(dir, f), [1, 2, 3]);
         }
         var scan = Files.Scan([dir], recursive: true, "{name}_x{scale}", ["model-1"]);
         Assert.Equal(["a.png", Path.Combine("other_x4", "c.png"), Path.Combine("sub", "b.png")], scan.Items.Select(i => i.Rel));
-        Assert.Equal(2, scan.PreviousResults);
+        Assert.Equal(3, scan.PreviousResults);
     }
 }
