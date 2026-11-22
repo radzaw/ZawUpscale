@@ -89,75 +89,110 @@ public sealed class Upscaler(ISrModel model)
         return tile;
     }
 
-    /// <summary>One network pass over the whole image, tile by tile.</summary>
+    /// <summary>
+    /// One network pass over the whole image, tile by tile. The image is cut into as many tiles as <paramref name="tile"/>
+    /// takes, all (nearly) the same size, so no edge strip runs mostly padding. While the network runs a tile, the result
+    /// of the one before is copied into the image on another thread.
+    /// </summary>
     internal RgbaImage RunPass(RgbaImage src, int tile, Action? tileDone, CancellationToken ct)
     {
         var s = model.Scale;
         int W = src.Width, H = src.Height;
         var dst = new RgbaImage(W * s, H * s);
         var sp = src.Pixels;
-        var dp = dst.Pixels;
-        var dstStride = dst.Width * 4;
-        // With uniform tiles, every input is as large as the largest region (an inner tile with context on both sides).
-        var uniform = model.FixedSize == null && model.UniformTiles
-            ? (W: RoundUp(Math.Min(W, tile + 2 * Pad), Multiple), H: RoundUp(Math.Min(H, tile + 2 * Pad), Multiple))
+        int nx = (W + tile - 1) / tile, ny = (H + tile - 1) / tile;
+        int tw = (W + nx - 1) / nx, th = (H + ny - 1) / ny; // the largest tile
+        // The input size of every tile, when they share one: the fixed size, or with uniform tiles that of an inner tile
+        // with context on both sides.
+        var same = model.FixedSize is { } f ? f
+            : model.UniformTiles ? (RoundUp(Math.Min(W, tw + 2 * Pad), Multiple), RoundUp(Math.Min(H, th + 2 * Pad), Multiple))
             : ((int W, int H)?)null;
 
-        for (var y0 = 0; y0 < H; y0 += tile)
-            for (var x0 = 0; x0 < W; x0 += tile)
-            {
-                ct.ThrowIfCancellationRequested();
-                int x1 = Math.Min(x0 + tile, W), y1 = Math.Min(y0 + tile, H);
-                // Context around the tile, clamped to the image.
-                int px0 = Math.Max(x0 - Pad, 0), py0 = Math.Max(y0 - Pad, 0);
-                int px1 = Math.Min(x1 + Pad, W), py1 = Math.Min(y1 + Pad, H);
-                int rw = px1 - px0, rh = py1 - py0;
-                // Network input size: the region, grown to the fixed size or the next multiple; the extra is filled by repeating the edge.
-                int iw, ih;
-                if (model.FixedSize is { } f) (iw, ih) = (f.Width, f.Height);
-                else if (uniform is { } u) (iw, ih) = (u.W, u.H);
-                else (iw, ih) = (RoundUp(rw, Multiple), RoundUp(rh, Multiple));
-
-                var input = new float[3 * iw * ih];
-                var plane = iw * ih;
-                const float k = 1f / 255f;
-                for (var y = 0; y < ih; y++)
+        Task? copying = null;
+        try
+        {
+            for (var j = 0; j < ny; j++)
+                for (var i = 0; i < nx; i++)
                 {
-                    var sy = py0 + Math.Min(y, rh - 1);
-                    var row = sy * W;
-                    for (var x = 0; x < iw; x++)
+                    ct.ThrowIfCancellationRequested();
+                    int x0 = (int)((long)i * W / nx), x1 = (int)((long)(i + 1) * W / nx);
+                    int y0 = (int)((long)j * H / ny), y1 = (int)((long)(j + 1) * H / ny);
+                    // The region read from the image (rx0, ry0, rw × rh) and the network input size (iw × ih); any input
+                    // beyond the region is filled by repeating its edge.
+                    int rx0, ry0, rw, rh, iw, ih;
+                    if (same is { } u)
                     {
-                        var si = (row + px0 + Math.Min(x, rw - 1)) * 4;
-                        var di = y * iw + x;
-                        input[di] = sp[si] * k;
-                        input[plane + di] = sp[si + 1] * k;
-                        input[2 * plane + di] = sp[si + 2] * k;
+                        (iw, ih) = u;
+                        // Context around the tile, but at the image's edges the region moves inward, to be filled with
+                        // more of the image rather than repeated edge pixels.
+                        rx0 = Math.Clamp(x0 - Pad, 0, Math.Max(0, W - iw));
+                        ry0 = Math.Clamp(y0 - Pad, 0, Math.Max(0, H - ih));
+                        (rw, rh) = (Math.Min(iw, W - rx0), Math.Min(ih, H - ry0));
                     }
-                }
-
-                var output = model.Run(input, ih, iw);
-                int ow = iw * s, oh = ih * s, oplane = ow * oh;
-                if (output.Length != 3 * oplane)
-                    throw new ApiException($"The model returned {output.Length} values for a {iw}×{ih} tile; expected {3 * oplane} (scale {s}).");
-
-                // Keep only the tile itself, without the context.
-                int cx0 = (x0 - px0) * s, cy0 = (y0 - py0) * s;
-                int cw = (x1 - x0) * s, ch = (y1 - y0) * s;
-                for (var y = 0; y < ch; y++)
-                {
-                    var oi = (cy0 + y) * ow + cx0;
-                    var di = (y0 * s + y) * dstStride + x0 * s * 4;
-                    for (var x = 0; x < cw; x++, oi++, di += 4)
+                    else
                     {
-                        dp[di] = ToByte(output[oi]);
-                        dp[di + 1] = ToByte(output[oplane + oi]);
-                        dp[di + 2] = ToByte(output[2 * oplane + oi]);
-                        dp[di + 3] = 255;
+                        // Context around the tile, clamped to the image; the input is grown to the next multiple.
+                        (rx0, ry0) = (Math.Max(x0 - Pad, 0), Math.Max(y0 - Pad, 0));
+                        (rw, rh) = (Math.Min(x1 + Pad, W) - rx0, Math.Min(y1 + Pad, H) - ry0);
+                        (iw, ih) = (RoundUp(rw, Multiple), RoundUp(rh, Multiple));
                     }
+
+                    var input = new float[3 * iw * ih];
+                    var plane = iw * ih;
+                    const float k = 1f / 255f;
+                    for (var y = 0; y < ih; y++)
+                    {
+                        var row = (ry0 + Math.Min(y, rh - 1)) * W;
+                        for (var x = 0; x < iw; x++)
+                        {
+                            var si = (row + rx0 + Math.Min(x, rw - 1)) * 4;
+                            var di = y * iw + x;
+                            input[di] = sp[si] * k;
+                            input[plane + di] = sp[si + 1] * k;
+                            input[2 * plane + di] = sp[si + 2] * k;
+                        }
+                    }
+
+                    var output = model.Run(input, ih, iw);
+                    if (output.Length != 3 * iw * s * ih * s)
+                        throw new ApiException($"The model returned {output.Length} values for a {iw}×{ih} tile; expected {3 * iw * s * ih * s} (scale {s}).");
+
+                    // Keep only the tile itself, without the context.
+                    copying?.GetAwaiter().GetResult();
+                    int cx0 = (x0 - rx0) * s, cy0 = (y0 - ry0) * s, ow = iw * s, oh = ih * s;
+                    int tx = x0 * s, ty = y0 * s, cw = (x1 - x0) * s, ch = (y1 - y0) * s;
+                    copying = Task.Run(() => CopyOut(output, ow, oh, cx0, cy0, dst, tx, ty, cw, ch));
+                    tileDone?.Invoke();
                 }
-                tileDone?.Invoke();
-            }
+            copying?.GetAwaiter().GetResult();
+            copying = null;
+        }
+        finally
+        {
+            // On an error or cancellation, let the last copy finish before the image is dropped.
+            try { copying?.Wait(); }
+            catch (AggregateException) { /* the first error is the one thrown */ }
+        }
         return dst;
+    }
+
+    /// <summary>Copies cw × ch pixels at (cx0, cy0) of a planar RGB network output (ow × oh) to (tx, ty) of the image.</summary>
+    static void CopyOut(float[] output, int ow, int oh, int cx0, int cy0, RgbaImage dst, int tx, int ty, int cw, int ch)
+    {
+        var dp = dst.Pixels;
+        int oplane = ow * oh, dstStride = dst.Width * 4;
+        for (var y = 0; y < ch; y++)
+        {
+            var oi = (cy0 + y) * ow + cx0;
+            var di = (ty + y) * dstStride + tx * 4;
+            for (var x = 0; x < cw; x++, oi++, di += 4)
+            {
+                dp[di] = ToByte(output[oi]);
+                dp[di + 1] = ToByte(output[oplane + oi]);
+                dp[di + 2] = ToByte(output[2 * oplane + oi]);
+                dp[di + 3] = 255;
+            }
+        }
     }
 
     static int RoundUp(int v, int m) => (v + m - 1) / m * m;

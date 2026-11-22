@@ -1,4 +1,6 @@
 using Microsoft.ML.OnnxRuntime;
+using System.Numerics.Tensors;
+using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using SessionOptions = Microsoft.ML.OnnxRuntime.SessionOptions;
 
@@ -16,47 +18,75 @@ public interface IEngineModel : IDisposable
 /// <summary>An ONNX super-resolution network (Real-ESRGAN and similar): NCHW RGB in [0, 1], float32 or float16.</summary>
 public sealed class OnnxSrModel : ISrModel, IEngineModel
 {
-    readonly InferenceSession session;
-    readonly string inputName, outputName;
-    readonly bool half;
+    /// <summary>Static-shape sessions kept at once; each holds its own copy of the weights and buffers on the GPU.</summary>
+    const int MaxShapes = 2;
+
+    readonly Func<SessionOptions> options;
+    readonly string path, inputName, outputName;
+    readonly bool halfIn, halfOut;
+    readonly string?[]? dimNames;
+    /// <summary>The session for every input size, or null when each input size gets its own (see <see cref="StaticShapes"/>).</summary>
+    readonly InferenceSession? session;
+    readonly List<((int H, int W) Shape, InferenceSession Session)> shaped = [];
     RunOptions runOptions = new();
 
     public int Scale { get; }
     public (int Width, int Height)? FixedSize { get; }
     public string Device { get; }
     public bool UniformTiles { get; init; }
+    /// <summary>
+    /// True if each input size runs in a session made for it (its free dimensions fixed). DirectML plans a static graph
+    /// far better: 35–40% faster for float16 Real-ESRGAN. A dynamic DirectML session also slows down for good after
+    /// one run at a different size (the 32 px probe below makes later 512 px tiles 20–60% slower), so it is not kept.
+    /// </summary>
+    public bool StaticShapes { get; }
 
-    public OnnxSrModel(string path, SessionOptions options, string device)
+    public OnnxSrModel(string path, Func<SessionOptions> options, string device, bool staticShapes = false)
     {
+        this.path = path;
+        this.options = options;
         Device = device;
-        session = new InferenceSession(path, options);
+        var probe = new InferenceSession(path, options());
         try
         {
-            if (session.InputMetadata.Count < 1 || session.OutputMetadata.Count < 1) throw new ApiException("The model has no inputs or outputs.");
-            var (inName, inMeta) = session.InputMetadata.First();
+            if (probe.InputMetadata.Count < 1 || probe.OutputMetadata.Count < 1) throw new ApiException("The model has no inputs or outputs.");
+            var (inName, inMeta) = probe.InputMetadata.First();
             inputName = inName;
-            outputName = session.OutputMetadata.Keys.First();
+            var (outName, outMeta) = probe.OutputMetadata.First();
+            outputName = outName;
             if (!inMeta.IsTensor || inMeta.Dimensions.Length != 4)
                 throw new ApiException("This model doesn't look like an image upscaler: it should take one image tensor [1, 3, height, width].");
             if (inMeta.Dimensions[1] is not (3 or -1))
                 throw new ApiException($"The model expects {inMeta.Dimensions[1]} color channels; only RGB (3) models are supported.");
-            half = inMeta.ElementDataType == TensorElementType.Float16;
-            if (!half && inMeta.ElementDataType != TensorElementType.Float)
+            halfIn = inMeta.ElementDataType == TensorElementType.Float16;
+            if (!halfIn && inMeta.ElementDataType != TensorElementType.Float)
                 throw new ApiException($"The model's input is {inMeta.ElementDataType}; only float32 and float16 models are supported.");
+            halfOut = outMeta.IsTensor && outMeta.ElementDataType == TensorElementType.Float16;
             int dh = inMeta.Dimensions[2], dw = inMeta.Dimensions[3];
             if (dh > 0 && dw > 0) FixedSize = (dw, dh);
 
             // Find the scale by running a small blank tile; this also warms the device up.
             var (pw, ph) = FixedSize ?? (32, 32);
-            RunRaw(new float[3 * pw * ph], ph, pw, out var shape);
+            var probeOut = Infer(probe, new float[3 * pw * ph], ph, pw, null, out var shape);
             if (shape.Length != 4 || shape[2] % ph != 0 || shape[3] % pw != 0 || shape[2] / ph != shape[3] / pw || shape[1] != 3)
                 throw new ApiException($"Unexpected model output shape [{string.Join(", ", shape)}] for a {pw}×{ph} input.");
             Scale = (int)(shape[2] / ph);
             if (Scale is < 1 or > 16) throw new ApiException($"Unsupported model scale {Scale}×.");
+
+            // Sizes can only be fixed through named free dimensions; a fixed-size network is static already.
+            var names = inMeta.SymbolicDimensions;
+            StaticShapes = staticShapes && FixedSize == null && names.Length == 4
+                && (inMeta.Dimensions[2] > 0 || names[2] is { Length: > 0 }) && (inMeta.Dimensions[3] > 0 || names[3] is { Length: > 0 });
+            if (StaticShapes)
+            {
+                dimNames = names;
+                probe.Dispose();
+            }
+            else session = probe;
         }
         catch
         {
-            session.Dispose();
+            probe.Dispose();
             throw;
         }
     }
@@ -65,7 +95,9 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
     {
         try
         {
-            return RunRaw(chw, h, w, out _);
+            var output = GC.AllocateUninitializedArray<float>(3 * h * Scale * w * Scale);
+            Infer(SessionFor(h, w), chw, h, w, output, out _);
+            return output;
         }
         catch (OnnxRuntimeException ex) when (runOptions.Terminate)
         {
@@ -77,6 +109,26 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
         }
     }
 
+    InferenceSession SessionFor(int h, int w)
+    {
+        if (session != null) return session;
+        var i = shaped.FindIndex(s => s.Shape == (h, w));
+        if (i >= 0) return shaped[i].Session;
+        // Make room first: the old session's GPU memory may be needed for the new one.
+        while (shaped.Count >= MaxShapes)
+        {
+            shaped[0].Session.Dispose();
+            shaped.RemoveAt(0);
+        }
+        var so = options();
+        long[] values = [1, 3, h, w];
+        for (var d = 0; d < 4; d++)
+            if (dimNames![d] is { Length: > 0 } name) so.AddFreeDimensionOverrideByName(name, values[d]);
+        var created = new InferenceSession(path, so);
+        shaped.Add(((h, w), created));
+        return created;
+    }
+
     internal static bool IsOutOfMemory(Exception ex)
     {
         var m = ex.Message;
@@ -85,31 +137,57 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
             || m.Contains("8007000E", StringComparison.OrdinalIgnoreCase);
     }
 
-    float[] RunRaw(float[] chw, int h, int w, out long[] shape)
+    /// <summary>
+    /// Runs one input. With <paramref name="output"/> (sized for the model's scale), the result is written straight into it
+    /// (and returned); without, the output's shape is unknown, so it is copied out of the result tensor.
+    /// </summary>
+    float[] Infer(InferenceSession s, float[] chw, int h, int w, float[]? output, out long[] shape)
     {
         long[] inShape = [1, 3, h, w];
-        using var input = half
+        using var input = halfIn
             ? OrtValue.CreateTensorValueFromMemory(ToHalf(chw), inShape)
             : OrtValue.CreateTensorValueFromMemory(chw, inShape);
-        using var outputs = session.Run(runOptions, [inputName], [input], [outputName]);
-        var o = outputs[0];
-        shape = o.GetTensorTypeAndShape().Shape;
-        if (half)
+        if (output != null)
         {
-            var src = o.GetTensorDataAsSpan<Float16>();
+            long[] outShape = [1, 3, h * Scale, w * Scale];
+            shape = outShape;
+            if (halfOut)
+            {
+                var buffer = new Float16[output.Length];
+                using (var o = OrtValue.CreateTensorValueFromMemory(buffer, outShape))
+                    s.Run(runOptions, [inputName], [input], [outputName], [o]);
+                FromHalf(buffer, output);
+            }
+            else
+            {
+                using var o = OrtValue.CreateTensorValueFromMemory(output, outShape);
+                s.Run(runOptions, [inputName], [input], [outputName], [o]);
+            }
+            return output;
+        }
+        using var outputs = s.Run(runOptions, [inputName], [input], [outputName]);
+        var result = outputs[0];
+        shape = result.GetTensorTypeAndShape().Shape;
+        if (halfOut)
+        {
+            var src = result.GetTensorDataAsSpan<Float16>();
             var r = new float[src.Length];
-            for (var i = 0; i < r.Length; i++) r[i] = (float)BitConverter.UInt16BitsToHalf(src[i].value);
+            FromHalf(src, r);
             return r;
         }
-        return o.GetTensorDataAsSpan<float>().ToArray();
+        return result.GetTensorDataAsSpan<float>().ToArray();
     }
 
+    // ORT's Float16 is the IEEE half's bits, so the vectorised conversions of System.Numerics.Tensors apply.
     static Float16[] ToHalf(float[] a)
     {
         var r = new Float16[a.Length];
-        for (var i = 0; i < a.Length; i++) r[i] = new Float16(BitConverter.HalfToUInt16Bits((Half)a[i]));
+        TensorPrimitives.ConvertToHalf(a, MemoryMarshal.Cast<Float16, Half>(r.AsSpan()));
         return r;
     }
+
+    static void FromHalf(ReadOnlySpan<Float16> src, Span<float> dst) =>
+        TensorPrimitives.ConvertToSingle(MemoryMarshal.Cast<Float16, Half>(src), dst);
 
     /// <summary>Makes a running inference stop when <paramref name="ct"/> is cancelled.</summary>
     public IDisposable BindCancellation(CancellationToken ct)
@@ -126,7 +204,9 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
 
     public void Dispose()
     {
-        session.Dispose();
+        session?.Dispose();
+        foreach (var (_, s) in shaped) s.Dispose();
+        shaped.Clear();
         runOptions.Dispose();
     }
 }
@@ -211,7 +291,7 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             if (faces != null && facesKey == key) return faces;
             faces?.Dispose();
             faces = null;
-            faces = OnDevice(device, (so, name) => new FaceModels(restorerPath, detectorPath, so, name));
+            faces = OnDevice(device, (options, name) => new FaceModels(restorerPath, detectorPath, options(), name));
             facesKey = key;
             return faces;
         }
@@ -234,12 +314,20 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
     OnnxSrModel Create(string path, string device)
     {
         if (!File.Exists(path)) throw new ApiException($"Model file not found: {path}");
-        // Core ML compiles the network for each input shape it sees, so every tile of a pass is given the same one.
-        return OnDevice(device, (so, name) => new OnnxSrModel(path, so, name) { UniformTiles = GpuBackend == "CoreML" && name != "CPU" });
+        // Core ML compiles the network for each input shape it sees, and DirectML runs much faster with a static one (each
+        // input size gets its own session), so on both every tile of a pass is given the same size.
+        return OnDevice(device, (options, name) =>
+        {
+            var gpu = name != "CPU";
+            return new OnnxSrModel(path, options, name, staticShapes: gpu && GpuBackend == "DirectML") { UniformTiles = gpu && (GpuBackend == "CoreML" || GpuBackend == "DirectML") };
+        });
     }
 
-    /// <summary>Creates a model on the chosen GPU, or the CPU; "auto" falls back to the CPU when the GPU fails.</summary>
-    T OnDevice<T>(string device, Func<SessionOptions, string, T> create)
+    /// <summary>
+    /// Creates a model on the chosen GPU, or the CPU; "auto" falls back to the CPU when the GPU fails. The model is given
+    /// a factory of session options for the device, as it may need more than one session.
+    /// </summary>
+    T OnDevice<T>(string device, Func<Func<SessionOptions>, string, T> create)
     {
         var gpus = HasGpu ? Gpu.Adapters() : [];
         // "auto" with no GPU found goes straight to the CPU; an explicit GPU is tried anyway, to report why it fails.
@@ -249,8 +337,7 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             var name = gpus.FirstOrDefault(g => g.Index == index)?.Name ?? $"GPU {index}";
             try
             {
-                var so = GpuOptions(index);
-                var m = create(so, $"{name} ({GpuBackend})");
+                var m = create(() => GpuOptions(index), $"{name} ({GpuBackend})");
                 lastGpuError = null;
                 return m;
             }
@@ -261,8 +348,7 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
                 if (device != "auto") throw new ApiException($"Could not use {name}: {lastGpuError}");
             }
         }
-        var cpu = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
-        return create(cpu, "CPU");
+        return create(() => new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL }, "CPU");
     }
 
     /// <summary>Why the GPU couldn't be used, in words a user can act on where possible.</summary>

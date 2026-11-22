@@ -26,8 +26,21 @@ public class UpscalerTests
         new Upscaler(model).RunPass(TestImages.Pattern(70, 30), 32, null, default);
         Assert.Equal(Upscaler.TileCount(70, 30, 32), model.Calls);
         Assert.All(model.Sizes, s => { Assert.Equal(0, s.H % Upscaler.Multiple); Assert.Equal(0, s.W % Upscaler.Multiple); });
-        // The first tile sees 16 px of context to the right: 32 + 16 = 48 wide.
-        Assert.Equal((32, 48), model.Sizes[0]);
+        // 70 px takes three tiles of 23–24 px; the first sees 16 px of context to the right: 23 + 16 = 39, so 40 wide.
+        Assert.Equal((32, 40), model.Sizes[0]);
+    }
+
+    [Fact]
+    public void Tiles_are_balanced_so_edge_tiles_are_not_mostly_padding()
+    {
+        // 100 × 70 with 64 px tiles: 2 × 2 tiles of 50 × 35, not 64 + 36 by 64 + 6.
+        var src = TestImages.Pattern(100, 70);
+        var model = new FakeModel(2, uniformTiles: true);
+        var result = new Upscaler(model).RunPass(src, 64, null, default);
+        Assert.Equal(TestImages.Nearest(src, 2).Pixels, result.Pixels);
+        Assert.Equal(4, model.Calls);
+        // An inner tile's input: 35 + 2 × 16 = 67 → 68 high, 50 + 2 × 16 = 82 → 84 wide.
+        Assert.All(model.Sizes, s => Assert.Equal((68, 84), s));
     }
 
     [Theory]
