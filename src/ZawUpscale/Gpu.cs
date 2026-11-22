@@ -17,6 +17,7 @@ public static unsafe class Gpu
     static readonly Guid IID_IDXGIFactory1 = new("770aae78-f26f-4dba-a829-253c83d1b387");
     const int DXGI_ERROR_NOT_FOUND = unchecked((int)0x887A0002);
     const uint DXGI_ADAPTER_FLAG_SOFTWARE = 2;
+    const uint MicrosoftVendorId = 0x1414;
 
     [StructLayout(LayoutKind.Sequential)]
     struct AdapterDesc1
@@ -125,7 +126,9 @@ public static unsafe class Gpu
                 var getDesc1 = (delegate* unmanaged[Stdcall]<IntPtr, AdapterDesc1*, int>)avt[10];
                 var release = (delegate* unmanaged[Stdcall]<IntPtr, uint>)avt[2];
                 AdapterDesc1 d;
-                if (getDesc1(adapter, &d) >= 0 && (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0)
+                // Skip software adapters, and Microsoft's own (Basic Render Driver, Basic Display, Hyper-V, Remote
+                // Display): on GPU-less VMs these come without the software flag, and DirectML can't use them.
+                if (getDesc1(adapter, &d) >= 0 && (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 && d.VendorId != MicrosoftVendorId)
                     list.Add(new GpuAdapter((int)i, new string(d.Description).TrimEnd('\0').Trim(), (long)d.DedicatedVideoMemory));
                 release(adapter);
             }
