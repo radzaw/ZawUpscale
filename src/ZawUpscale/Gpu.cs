@@ -139,4 +139,62 @@ public static unsafe class Gpu
             release(factory);
         }
     }
+
+    static readonly Guid IID_IDXGIAdapter3 = new("645967a4-1392-4310-a798-8053ce3e93fd");
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct VideoMemoryInfo { public ulong Budget, CurrentUsage, AvailableForReservation, CurrentReservation; }
+
+    /// <summary>
+    /// The share of DirectX adapter <paramref name="index"/>'s local memory budget this process uses (0–1, can exceed 1),
+    /// or null if it can't be read. Past the budget, Windows moves GPU memory to system RAM, and everything slows down.
+    /// </summary>
+    public static double? MemoryPressure(int index)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try
+        {
+            if (CreateDXGIFactory1(IID_IDXGIFactory1, out var factory) < 0 || factory == IntPtr.Zero) return null;
+            try
+            {
+                var enumAdapters1 = (delegate* unmanaged[Stdcall]<IntPtr, uint, IntPtr*, int>)(*(IntPtr**)factory)[12];
+                IntPtr adapter;
+                if (enumAdapters1(factory, (uint)index, &adapter) < 0) return null;
+                var avt = *(IntPtr**)adapter;
+                var queryInterface = (delegate* unmanaged[Stdcall]<IntPtr, Guid*, IntPtr*, int>)avt[0];
+                var release = (delegate* unmanaged[Stdcall]<IntPtr, uint>)avt[2];
+                try
+                {
+                    var iid = IID_IDXGIAdapter3;
+                    IntPtr adapter3;
+                    if (queryInterface(adapter, &iid, &adapter3) < 0) return null; // before Windows 10
+                    try
+                    {
+                        // IDXGIAdapter3 vtable: IUnknown (3), IDXGIObject (4), IDXGIAdapter (3), IDXGIAdapter1 (1),
+                        // IDXGIAdapter2 (1), two content-protection methods, then QueryVideoMemoryInfo.
+                        var query = (delegate* unmanaged[Stdcall]<IntPtr, uint, int, VideoMemoryInfo*, int>)(*(IntPtr**)adapter3)[14];
+                        VideoMemoryInfo info;
+                        if (query(adapter3, 0, 0 /* DXGI_MEMORY_SEGMENT_GROUP_LOCAL */, &info) < 0 || info.Budget == 0) return null;
+                        return (double)info.CurrentUsage / info.Budget;
+                    }
+                    finally
+                    {
+                        ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)adapter3)[2])(adapter3);
+                    }
+                }
+                finally
+                {
+                    release(adapter);
+                }
+            }
+            finally
+            {
+                ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)factory)[2])(factory);
+            }
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or SEHException)
+        {
+            return null;
+        }
+    }
 }

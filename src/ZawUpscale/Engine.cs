@@ -18,8 +18,13 @@ public interface IEngineModel : IDisposable
 /// <summary>An ONNX super-resolution network (Real-ESRGAN and similar): NCHW RGB in [0, 1], float32 or float16.</summary>
 public sealed class OnnxSrModel : ISrModel, IEngineModel
 {
-    /// <summary>Static-shape sessions kept at once; each holds its own copy of the weights and buffers on the GPU.</summary>
-    const int MaxShapes = 2;
+    /// <summary>
+    /// Static-shape sessions kept at most; each holds its own weights and buffers on the GPU. Older ones are kept only while
+    /// the process uses less than <see cref="MaxMemoryShare"/> of the GPU's memory budget: past the budget DirectML doesn't
+    /// fail but pages to system RAM, and a 1 s tile can take a minute.
+    /// </summary>
+    const int MaxShapes = 3;
+    const double MaxMemoryShare = 0.4;
 
     readonly Func<SessionOptions> options;
     readonly string path, inputName, outputName;
@@ -40,13 +45,16 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
     /// one run at a different size (the 32 px probe below makes later 512 px tiles 20–60% slower), so it is not kept.
     /// </summary>
     public bool StaticShapes { get; }
+    /// <summary>The share of the GPU's memory budget in use (see <see cref="Gpu.MemoryPressure"/>); without it only one static-shape session is kept.</summary>
+    public Func<double?>? MemoryPressure { get; init; }
 
     public OnnxSrModel(string path, Func<SessionOptions> options, string device, bool staticShapes = false)
     {
         this.path = path;
         this.options = options;
         Device = device;
-        var probe = new InferenceSession(path, options());
+        InferenceSession probe;
+        using (var so = options()) probe = new InferenceSession(path, so);
         try
         {
             if (probe.InputMetadata.Count < 1 || probe.OutputMetadata.Count < 1) throw new ApiException("The model has no inputs or outputs.");
@@ -73,10 +81,13 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
             Scale = (int)(shape[2] / ph);
             if (Scale is < 1 or > 16) throw new ApiException($"Unsupported model scale {Scale}×.");
 
-            // Sizes can only be fixed through named free dimensions; a fixed-size network is static already.
+            // Sizes can only be fixed through named free dimensions, one name each (a model may call both height and width
+            // "size", which a non-square tile can't satisfy); a fixed-size network is static already.
             var names = inMeta.SymbolicDimensions;
+            var free = Enumerable.Range(0, 4).Where(d => inMeta.Dimensions[d] <= 0).ToList();
             StaticShapes = staticShapes && FixedSize == null && names.Length == 4
-                && (inMeta.Dimensions[2] > 0 || names[2] is { Length: > 0 }) && (inMeta.Dimensions[3] > 0 || names[3] is { Length: > 0 });
+                && free.Where(d => d >= 2).All(d => names[d] is { Length: > 0 })
+                && free.Where(d => names[d] is { Length: > 0 }).Select(d => names[d]).Distinct().Count() == free.Count(d => names[d] is { Length: > 0 });
             if (StaticShapes)
             {
                 dimNames = names;
@@ -95,9 +106,16 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
     {
         try
         {
-            var output = GC.AllocateUninitializedArray<float>(3 * h * Scale * w * Scale);
-            Infer(SessionFor(h, w), chw, h, w, output, out _);
-            return output;
+            try
+            {
+                return RunOnce(chw, h, w);
+            }
+            catch (OnnxRuntimeException ex) when (!runOptions.Terminate && IsOutOfMemory(ex) && shaped.Any(s => s.Shape != (h, w)))
+            {
+                // The sessions of other sizes hold GPU memory too: let them go before deciding the tile is too large.
+                DropShapes();
+                return RunOnce(chw, h, w);
+            }
         }
         catch (OnnxRuntimeException ex) when (runOptions.Terminate)
         {
@@ -109,24 +127,53 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
         }
     }
 
+    float[] RunOnce(float[] chw, int h, int w)
+    {
+        var output = GC.AllocateUninitializedArray<float>(3 * h * Scale * w * Scale);
+        Infer(SessionFor(h, w), chw, h, w, output, out _);
+        return output;
+    }
+
     InferenceSession SessionFor(int h, int w)
     {
         if (session != null) return session;
         var i = shaped.FindIndex(s => s.Shape == (h, w));
-        if (i >= 0) return shaped[i].Session;
+        if (i >= 0)
+        {
+            // Most recently used last, so the oldest is dropped first.
+            var hit = shaped[i];
+            shaped.RemoveAt(i);
+            shaped.Add(hit);
+            return hit.Session;
+        }
         // Make room first: the old session's GPU memory may be needed for the new one.
-        while (shaped.Count >= MaxShapes)
+        DropShapes(MaxShapes - 1);
+        while (shaped.Count > 0 && !(MemoryPressure?.Invoke() < MaxMemoryShare)) DropShapes(shaped.Count - 1);
+        using var so = options();
+        long[] values = [1, 3, h, w];
+        for (var d = 0; d < 4; d++)
+            if (dimNames![d] is { Length: > 0 } name) so.AddFreeDimensionOverrideByName(name, values[d]);
+        InferenceSession created;
+        try
+        {
+            created = new InferenceSession(path, so);
+        }
+        catch (OnnxRuntimeException ex) when (!IsOutOfMemory(ex))
+        {
+            throw new GpuFailedException(ex.Message, ex);
+        }
+        shaped.Add(((h, w), created));
+        return created;
+    }
+
+    /// <summary>Disposes the oldest static-shape sessions until at most <paramref name="keep"/> are left.</summary>
+    void DropShapes(int keep = 0)
+    {
+        while (shaped.Count > keep)
         {
             shaped[0].Session.Dispose();
             shaped.RemoveAt(0);
         }
-        var so = options();
-        long[] values = [1, 3, h, w];
-        for (var d = 0; d < 4; d++)
-            if (dimNames![d] is { Length: > 0 } name) so.AddFreeDimensionOverrideByName(name, values[d]);
-        var created = new InferenceSession(path, so);
-        shaped.Add(((h, w), created));
-        return created;
     }
 
     internal static bool IsOutOfMemory(Exception ex)
@@ -205,8 +252,7 @@ public sealed class OnnxSrModel : ISrModel, IEngineModel
     public void Dispose()
     {
         session?.Dispose();
-        foreach (var (_, s) in shaped) s.Dispose();
-        shaped.Clear();
+        DropShapes();
         runOptions.Dispose();
     }
 }
@@ -291,7 +337,11 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             if (faces != null && facesKey == key) return faces;
             faces?.Dispose();
             faces = null;
-            faces = OnDevice(device, (options, name) => new FaceModels(restorerPath, detectorPath, options(), name));
+            faces = OnDevice(device, (options, name) =>
+            {
+                using var so = options();
+                return new FaceModels(restorerPath, detectorPath, so, name);
+            });
             facesKey = key;
             return faces;
         }
@@ -319,9 +369,18 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
         return OnDevice(device, (options, name) =>
         {
             var gpu = name != "CPU";
-            return new OnnxSrModel(path, options, name, staticShapes: gpu && GpuBackend == "DirectML") { UniformTiles = gpu && (GpuBackend == "CoreML" || GpuBackend == "DirectML") };
+            var index = GpuIndex(device);
+            return new OnnxSrModel(path, options, name, staticShapes: gpu && GpuBackend == "DirectML")
+            {
+                UniformTiles = gpu && (GpuBackend == "CoreML" || GpuBackend == "DirectML"),
+                MemoryPressure = () => Gpu.MemoryPressure(index),
+            };
         });
     }
+
+    /// <summary>The GPU a device id means: N for "gpu:N", otherwise the first one.</summary>
+    static int GpuIndex(string device) =>
+        device.StartsWith("gpu:") && int.TryParse(device[4..], out var n) ? n : (HasGpu ? Gpu.Adapters() : []).FirstOrDefault()?.Index ?? 0;
 
     /// <summary>
     /// Creates a model on the chosen GPU, or the CPU; "auto" falls back to the CPU when the GPU fails. The model is given
@@ -333,7 +392,7 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
         // "auto" with no GPU found goes straight to the CPU; an explicit GPU is tried anyway, to report why it fails.
         if (device != "cpu" && HasGpu && (gpus.Count > 0 || device != "auto"))
         {
-            var index = device.StartsWith("gpu:") && int.TryParse(device[4..], out var n) ? n : gpus.FirstOrDefault()?.Index ?? 0;
+            var index = GpuIndex(device);
             var name = gpus.FirstOrDefault(g => g.Index == index)?.Name ?? $"GPU {index}";
             try
             {
@@ -421,7 +480,8 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
         SupirSettings? supir = null)
     {
         if (SupirPackage.IsPackage(modelPath)) return Supir(src, modelPath, device, scale, supir, progress, notice, ct);
-        if (tile <= 0) tile = AutoTile(device);
+        var autoTile = tile <= 0;
+        if (autoTile) tile = AutoTile(device);
         while (true)
         {
             var model = Load(modelPath, device);
@@ -429,6 +489,17 @@ public sealed class Engine(ILogger<Engine> log) : IDisposable
             try
             {
                 return new Upscaler(model).Upscale(src, scale, tile, progress, ct);
+            }
+            catch (GpuFailedException ex)
+            {
+                // As when loading: "auto" falls back to the CPU, a chosen GPU reports why it can't be used.
+                lastGpuError = GpuError(ex.InnerException ?? ex);
+                Unload();
+                if (device != "auto") throw new ApiException($"Could not use {model.Device}: {lastGpuError}");
+                log.LogWarning("GPU {Device} failed, using the CPU: {Message}", model.Device, ex.Message);
+                notice?.Invoke("The GPU failed; continuing on the CPU.");
+                device = "cpu";
+                if (autoTile) tile = AutoTile(device);
             }
             catch (TileTooLargeException ex) when (tile > 64)
             {

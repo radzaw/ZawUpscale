@@ -15,6 +15,9 @@ public interface ISrModel
 /// <summary>Thrown when a tile doesn't fit in (GPU) memory, so the caller can retry with smaller tiles.</summary>
 public sealed class TileTooLargeException(string message, Exception inner) : Exception(message, inner);
 
+/// <summary>Thrown when the GPU fails after the model was loaded (making a session for a new input size), so the caller can fall back to the CPU.</summary>
+public sealed class GpuFailedException(string message, Exception inner) : Exception(message, inner);
+
 /// <summary>
 /// Upscales images of any size by running the network over overlapping tiles: each tile is fed with
 /// <see cref="Pad"/> pixels of context around it, and only the centre of each result is kept, so the
@@ -25,6 +28,11 @@ public sealed class Upscaler(ISrModel model)
     public const int Pad = 16;
     /// <summary>Tile dimensions are rounded up to a multiple of this; some architectures need even or 4-divisible sizes.</summary>
     public const int Multiple = 4;
+    /// <summary>
+    /// With uniform tiles, input sizes are rounded up to a multiple of this (but no more than a full tile), so images of
+    /// different sizes share a few input sizes: backends that build a session or compile per size can reuse them.
+    /// </summary>
+    public const int ShapeStep = 32;
     public const long MaxOutputPixels = 400_000_000;
 
     public ISrModel Model => model;
@@ -103,9 +111,9 @@ public sealed class Upscaler(ISrModel model)
         int nx = (W + tile - 1) / tile, ny = (H + tile - 1) / tile;
         int tw = (W + nx - 1) / nx, th = (H + ny - 1) / ny; // the largest tile
         // The input size of every tile, when they share one: the fixed size, or with uniform tiles that of an inner tile
-        // with context on both sides.
+        // with context on both sides, rounded up to the next step (see ShapeStep).
         var same = model.FixedSize is { } f ? f
-            : model.UniformTiles ? (RoundUp(Math.Min(W, tw + 2 * Pad), Multiple), RoundUp(Math.Min(H, th + 2 * Pad), Multiple))
+            : model.UniformTiles ? (Step(Math.Min(W, tw + 2 * Pad), tile), Step(Math.Min(H, th + 2 * Pad), tile))
             : ((int W, int H)?)null;
 
         Task? copying = null;
@@ -158,14 +166,21 @@ public sealed class Upscaler(ISrModel model)
                         throw new ApiException($"The model returned {output.Length} values for a {iw}×{ih} tile; expected {3 * iw * s * ih * s} (scale {s}).");
 
                     // Keep only the tile itself, without the context.
-                    copying?.GetAwaiter().GetResult();
+                    if (copying != null)
+                    {
+                        copying.GetAwaiter().GetResult();
+                        tileDone?.Invoke(); // the previous tile, now in the image
+                    }
                     int cx0 = (x0 - rx0) * s, cy0 = (y0 - ry0) * s, ow = iw * s, oh = ih * s;
                     int tx = x0 * s, ty = y0 * s, cw = (x1 - x0) * s, ch = (y1 - y0) * s;
                     copying = Task.Run(() => CopyOut(output, ow, oh, cx0, cy0, dst, tx, ty, cw, ch));
-                    tileDone?.Invoke();
                 }
-            copying?.GetAwaiter().GetResult();
-            copying = null;
+            if (copying != null)
+            {
+                copying.GetAwaiter().GetResult();
+                copying = null;
+                tileDone?.Invoke();
+            }
         }
         finally
         {
@@ -196,6 +211,9 @@ public sealed class Upscaler(ISrModel model)
     }
 
     static int RoundUp(int v, int m) => (v + m - 1) / m * m;
+
+    /// <summary>An input size of at least <paramref name="v"/>: the next <see cref="ShapeStep"/>, or that of a full tile if smaller.</summary>
+    static int Step(int v, int tile) => Math.Min(RoundUp(v, ShapeStep), RoundUp(tile + 2 * Pad, Multiple));
 
     static byte ToByte(float v)
     {

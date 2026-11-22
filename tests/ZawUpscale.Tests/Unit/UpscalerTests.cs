@@ -39,8 +39,9 @@ public class UpscalerTests
         var result = new Upscaler(model).RunPass(src, 64, null, default);
         Assert.Equal(TestImages.Nearest(src, 2).Pixels, result.Pixels);
         Assert.Equal(4, model.Calls);
-        // An inner tile's input: 35 + 2 × 16 = 67 → 68 high, 50 + 2 × 16 = 82 → 84 wide.
-        Assert.All(model.Sizes, s => Assert.Equal((68, 84), s));
+        // An inner tile needs 35 + 2 × 16 = 67 by 50 + 2 × 16 = 82; both round up to a full tile, 64 + 2 × 16 = 96, rather
+        // than the next 64 px step (128).
+        Assert.All(model.Sizes, s => Assert.Equal((96, 96), s));
     }
 
     [Theory]
@@ -56,8 +57,22 @@ public class UpscalerTests
         Assert.Equal(TestImages.Nearest(src, 2).Pixels, result.Pixels);
         Assert.Single(model.Sizes.Distinct());
         var (sh, sw) = model.Sizes[0];
-        Assert.True(sw <= w + Upscaler.Multiple && sh <= h + Upscaler.Multiple, "no bigger than the image needs");
+        // No bigger than the image needs, up to the next shared size step.
+        Assert.True(sw <= RoundUp(w, Upscaler.ShapeStep) && sh <= RoundUp(h, Upscaler.ShapeStep), "no bigger than the image needs");
     }
+
+    [Fact]
+    public void Uniform_tiles_of_similar_images_share_an_input_size()
+    {
+        // Backends that build a session per input size (DirectML) reuse it across a batch of similar images.
+        var model = new FakeModel(1, uniformTiles: true);
+        var up = new Upscaler(model);
+        up.RunPass(new RgbaImage(1000, 700), 512, null, default);
+        up.RunPass(new RgbaImage(990, 690), 512, null, default);
+        Assert.Equal([(384, 544)], model.Sizes.Distinct());
+    }
+
+    static int RoundUp(int v, int m) => (v + m - 1) / m * m;
 
     [Fact]
     public void Fixed_size_models_get_their_exact_input_size()

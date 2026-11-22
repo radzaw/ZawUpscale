@@ -51,6 +51,8 @@
     <!-- AVIF, HEIC, TIFF and JPEG XL, and animated GIF and WebP frames, which Skia can't read or write. -->
     <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="14.17.2" />
     <PackageReference Include="SkiaSharp" Version="4.153.1" />
+    <!-- TensorPrimitives: vectorised float16 conversion of model inputs and outputs. -->
+    <PackageReference Include="System.Numerics.Tensors" Version="9.0.0" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.153.1" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" Condition="'$(ZawGpu)' == 'directml'" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.24.4" Condition="'$(ZawGpu)' == 'cuda'" />
